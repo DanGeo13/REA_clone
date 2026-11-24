@@ -1,5 +1,9 @@
 import type { AnalysisDatabaseEngine } from "./analysisDatabase.js";
 import type { DolHeader } from "./gamecubeDol.js";
+import type {
+  ArchitectureVariant,
+  RawEntryIsaMode,
+} from "./architectureVariant.js";
 import type { TargetFormatsOfKind } from "./targetFormats.js";
 import type { BundleExecutableSelection } from "./apple/bundleExecutableProvenance.js";
 
@@ -42,6 +46,40 @@ export interface ElfFamilyMetadata {
   readonly flags: number;
   readonly hasInterpreter?: boolean;
 }
+
+/**
+ * Admitted headerless load. File offset 0 maps at `baseAddress` and analysis
+ * starts at `entryPoint`; consumers read each role here instead of deriving
+ * one from the other.
+ */
+export interface RawBinaryLoad {
+  /** Canonical address of file offset 0. */
+  readonly baseAddress: string;
+  /** Caller-named profile variant; absent for the family's generic decoder. */
+  readonly architectureVariant?: ArchitectureVariant;
+  /** Canonical code entry. */
+  readonly entryPoint: string;
+  /** Instruction set at the entry, when the variant fixes one. */
+  readonly entryIsaMode?: RawEntryIsaMode;
+  readonly entrySource: RawBinaryEntrySource;
+}
+
+/**
+ * Whether the caller chose the entry or it was read from a vector table.
+ * Only canonical values are kept: caller spellings are not facts about the
+ * load, and a session reused across spellings must report the same load.
+ */
+export type RawBinaryEntrySource =
+  | { readonly kind: "caller" }
+  | {
+      readonly kind: "vector-table";
+      /** Canonical address of word 0. */
+      readonly address: string;
+      /** Word 1 as read, including its Thumb bit. */
+      readonly resetVector: string;
+      /** Word 0 as read; observed and not validated. */
+      readonly initialStackPointer: string;
+    };
 
 /** Prefix shared by CodeView RVA mapping and both payload readers. */
 export const PE_CODEVIEW_PREFIX_BYTES = 4096;
@@ -171,7 +209,45 @@ export interface MipsElfMetadata extends ElfFamilyMetadata {
 export interface RiscvElfMetadata extends ElfFamilyMetadata {
   /** Undefined until `.riscv.attributes` is inspected. */
   readonly isa?: RiscvIsaDeclaration;
+  /** Undefined until the section table is inspected; read for ET_EXEC and ET_DYN. */
+  readonly sectionOverlap?: ElfSectionOverlap;
 }
+
+/** One allocated section as its header declares it; values are lowercase 0x-hex. */
+export interface ElfSectionExtent {
+  readonly index: number;
+  /** Display only; null when the section-name table was not read. */
+  readonly name: string | null;
+  readonly address: string;
+  readonly size: string;
+}
+
+/** A section that takes part in an overlap of another shape. */
+export interface ElfSectionWitness extends ElfSectionExtent {
+  readonly nobits: boolean;
+  readonly executable: boolean;
+}
+
+/**
+ * Allocated address ranges that an executable section of a fixed-address image
+ * shares with another section. `code-reservation` is the one verified shape: a
+ * NOBITS section that starts with an executable PROGBITS section and covers it,
+ * with no other section overlapping either, as ESP-IDF's `.flash_rodata_dummy`
+ * reserves `.flash.text`.
+ */
+export type ElfSectionOverlap =
+  | { readonly status: "none" }
+  | {
+      readonly status: "code-reservation";
+      readonly code: ElfSectionExtent & { readonly offset: string };
+      readonly reservation: ElfSectionExtent;
+    }
+  /** The two sections whose overlap departs from that shape. */
+  | {
+      readonly status: "unsupported";
+      readonly witnesses: readonly [ElfSectionWitness, ElfSectionWitness];
+    }
+  | { readonly status: "unavailable"; readonly reason: string };
 
 /** The ISA an image declares in `.riscv.attributes`; not proof of every instruction. */
 export type RiscvIsaDeclaration =
@@ -337,8 +413,7 @@ export type BinaryTarget =
         | HeaderArchitecture
         | RawOnlyArchitecture
       )[];
-      readonly entryPoint: string;
-      readonly entryPointSource: string;
+      readonly rawLoad: RawBinaryLoad;
       readonly executableRole?: never;
       readonly managed?: never;
     })
