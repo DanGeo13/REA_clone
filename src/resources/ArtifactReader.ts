@@ -263,6 +263,7 @@ export interface ArtifactReader {
     | "esp-flash-image"
     | "fit"
     | "ntfs-mft"
+    | "systemd-journal"
     | "file";
   entries(
     signal?: AbortSignal,
