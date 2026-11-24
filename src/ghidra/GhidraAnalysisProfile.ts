@@ -34,6 +34,11 @@ import {
   ghidraPowerPcProfileParameters,
 } from "./GhidraPowerPcProfile.js";
 import {
+  ghidraArmLanguageOverride,
+  ghidraArmProfileParameters,
+  ghidraArmUnsupportedReason,
+} from "./GhidraArmProfile.js";
+import {
   GHIDRA_RAW_ENTRY_CONTEXT,
   ghidraRawBinaryLanguage,
   ghidraVariantProcessorLabels,
@@ -82,6 +87,7 @@ export const ghidraPinnedLanguage = (
   target: BinaryTarget,
 ): GhidraLanguageOverride | undefined =>
   ghidraMipsLanguageOverride(target) ??
+  ghidraArmLanguageOverride(target) ??
   ghidraRiscvLanguageOverride(target) ??
   ghidraPowerPcLanguage(target);
 
@@ -154,6 +160,17 @@ export const resolveGhidraAnalysisProfile = async (
           "resolve_analysis_profile",
           target.path,
           mipsReason,
+        ),
+      ),
+    );
+  const armReason = ghidraArmUnsupportedReason(target);
+  if (armReason !== null)
+    return Promise.resolve(
+      err(
+        new AnalysisUnsupportedTargetError(
+          "resolve_analysis_profile",
+          target.path,
+          armReason,
         ),
       ),
     );
@@ -266,9 +283,12 @@ export const resolveGhidraAnalysisProfile = async (
   const pinnedLanguage = ghidraPinnedLanguage(target);
   const callerMaySelectLegacyMipsLanguage =
     target.architecture === "mips" && isLegacyMipsAdmission(target);
+  // A deliberate caller-selected language wins over the ARM pin; the pin exists
+  // because header auto-selection misselects for interworked images.
   if (
     pinnedLanguage !== undefined &&
     target.architecture !== "powerpc" &&
+    target.architecture !== "arm" &&
     !callerMaySelectLegacyMipsLanguage &&
     languageOverride !== undefined &&
     (languageOverride.languageId !== pinnedLanguage.languageId ||
@@ -395,6 +415,7 @@ export const resolveGhidraAnalysisProfile = async (
             }),
         ...analyzerParameters,
         ...ghidraMipsProfileParameters(target, languageOverride),
+        ...ghidraArmProfileParameters(target, languageOverride),
         ...ghidraRiscvProfileParameters(target),
         ...ghidraPowerPcProfileParameters(target),
         ...(pspExtension?.ok === true

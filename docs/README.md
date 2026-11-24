@@ -169,6 +169,7 @@ The [REA website](https://rea.tools/) has worked examples and product pages.
 - [JEB instrumentation and analysis](providers/jeb-analysis.md)
 - [GameCube DOL analysis through Ghidra](ghidra-dol.md)
 - [PowerPC ELF analysis through Ghidra](ghidra-ppc.md)
+- [32-bit ARM (armhf) analysis through Ghidra](ghidra-arm.md)
 - [Kuna provider](kuna-provider.md)
 - [Reverse-engineering tool integrations](reverse-engineering-tools.md)
 

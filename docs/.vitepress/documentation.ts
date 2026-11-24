@@ -654,6 +654,11 @@ export const documentationSections = [
         route: "/ghidra-ppc",
       },
       {
+        text: "32-bit ARM (armhf) analysis through Ghidra",
+        source: "ghidra-arm.md",
+        route: "/ghidra-arm",
+      },
+      {
         text: "Kuna provider",
         source: "kuna-provider.md",
         route: "/kuna-provider",
