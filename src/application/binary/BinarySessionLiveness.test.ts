@@ -19,6 +19,7 @@ import {
 } from "../../ports/AnalysisProvider.js";
 import { createAnalysisProfile } from "../../domain/analysisProfile.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
+import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
 import type { ProviderOperationHealth } from "../../domain/providerOperationHealth.js";
 import { err, ok } from "../../domain/result.js";
 import { buildCapabilityInventory } from "../CapabilityInventory.js";
@@ -560,3 +561,4 @@ const killableDeepProvider = (options: {
     },
   };
 };
+
