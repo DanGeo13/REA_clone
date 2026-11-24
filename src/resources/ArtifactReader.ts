@@ -270,6 +270,7 @@ export interface ArtifactReader {
     | "esp-flash-image"
     | "fit"
     | "ntfs-mft"
+    | "auditd-log"
     | "file";
   entries(
     signal?: AbortSignal,
