@@ -1341,7 +1341,6 @@ describe("doctor macOS Hopper Python readiness", () => {
     {
       case: "without a Hopper launcher",
       overrides: {
-        validTarget: () => Promise.resolve(false),
         executable: () => Promise.resolve(false),
       },
     },
