@@ -1576,4 +1576,196 @@ describe("overlapping custom profile MMIO windows", () => {
       uniqueAddresses: ["0x40000200"],
     });
   });
+
+  it("keeps multi-reg Devicetree controller child devices isolated by node path and ignores SVD addressBlock holes on arm64", async () => {
+    const dtProp = (
+      name: string,
+      bytes: number,
+      derived: {
+        strings?: string[] | null;
+        cells?: number[] | null;
+        reg?: { address: string | null; size: string | null }[] | null;
+      },
+    ) => ({
+      name,
+      offset: 0,
+      bytes,
+      hex: "00".repeat(bytes),
+      truncated: false,
+      derived: {
+        confidence: "derived" as const,
+        strings: derived.strings ?? null,
+        cells: derived.cells ?? null,
+        reg: derived.reg ?? null,
+      },
+    });
+    const dt = {
+      artifact: {
+        path: "/tmp/multi-spi.dtb",
+        sha256: "f".repeat(64),
+        bytes: 512,
+      },
+      header: {
+        magic: 0xd00dfeed,
+        totalsize: 512,
+        off_dt_struct: 56,
+        off_dt_strings: 440,
+        off_mem_rsvmap: 40,
+        version: 17,
+        last_comp_version: 16,
+        boot_cpuid_phys: 0,
+        size_dt_strings: 72,
+        size_dt_struct: 384,
+      },
+      reservations: [],
+      nodes: [
+        {
+          path: "/",
+          parent: null,
+          offset: 0,
+          properties: [
+            dtProp("#address-cells", 4, { cells: [1] }),
+            dtProp("#size-cells", 4, { cells: [1] }),
+          ],
+        },
+        {
+          path: "/soc/spi@1000",
+          parent: "/",
+          offset: 64,
+          properties: [
+            dtProp("#address-cells", 4, { cells: [1] }),
+            dtProp("#size-cells", 4, { cells: [0] }),
+            dtProp("reg", 16, {
+              reg: [
+                { address: "0x1000", size: "0x100" },
+                { address: "0x1100", size: "0x100" },
+              ],
+            }),
+          ],
+        },
+        {
+          path: "/soc/spi@1000/flash@0",
+          parent: "/soc/spi@1000",
+          offset: 120,
+          properties: [
+            dtProp("compatible", 14, { strings: ["jedec,spi-nor"] }),
+            dtProp("reg", 4, { reg: [{ address: "0x0", size: null }] }),
+          ],
+        },
+        {
+          path: "/soc/spi@3000",
+          parent: "/",
+          offset: 180,
+          properties: [
+            dtProp("#address-cells", 4, { cells: [1] }),
+            dtProp("#size-cells", 4, { cells: [0] }),
+            dtProp("reg", 16, {
+              reg: [
+                { address: "0x3000", size: "0x100" },
+                { address: "0x3100", size: "0x100" },
+              ],
+            }),
+          ],
+        },
+        {
+          path: "/soc/spi@3000/sensor@0",
+          parent: "/soc/spi@3000",
+          offset: 240,
+          properties: [
+            dtProp("compatible", 14, { strings: ["bosch,bme280"] }),
+            dtProp("reg", 4, { reg: [{ address: "0x0", size: null }] }),
+          ],
+        },
+      ],
+      references: [],
+      summary: {
+        confidence: "derived" as const,
+        compatible: ["vendor,multi-spi"],
+        model: "Multi SPI Board",
+        bootargs: null,
+        stdout_path: null,
+        aliases: [],
+      },
+      coverage: {
+        status: "complete" as const,
+        examined_nodes: 5,
+        examined_properties: 12,
+      },
+      limitations: [],
+    };
+
+    const execution: AnalysisExecution = {
+      result: {
+        procedure: ghidraFunctionIdentity(),
+        direction: "outgoing",
+        reference_kinds_available: true,
+        references: [
+          // Second reg window of /soc/spi@1000 only; /soc/spi@3000 is untouched
+          { ...ghidraReferenceEdge(), target_address: "0x1104" },
+        ],
+        unresolved_calls: [],
+      },
+      rawResult: null,
+      provider: { id: "ghidra", name: "Ghidra", version: "12.2" },
+      locations: [],
+      subject: {
+        sha256: "a".repeat(64),
+        path: "/tmp/spi.bin",
+        format: "raw-binary",
+        architecture: "arm64",
+      },
+      limitations: [],
+    };
+
+    const dtRes = await reconstructProcedureHardwareInteractions(
+      { execute: () => Promise.resolve(ok(execution)) },
+      {
+        procedure: "spi_xfer",
+        architecture: "arm64",
+        devicetree: dt,
+      },
+    );
+    if (!dtRes.ok) throw dtRes.error;
+    expect(dtRes.value.peripheralBlocks).toHaveLength(1);
+    expect(
+      dtRes.value.peripheralBlocks[0]?.boardDevices.map((d) => d.id),
+    ).toEqual(["/soc/spi@1000/flash@0"]);
+
+    // On arm64, accesses in undeclared SVD addressBlock holes stay non-MMIO
+    const holeExecution: AnalysisExecution = {
+      ...execution,
+      result: {
+        procedure: ghidraFunctionIdentity(),
+        direction: "outgoing",
+        reference_kinds_available: true,
+        references: [
+          { ...ghidraReferenceEdge(), target_address: "0x9000050" },
+          { ...ghidraReferenceEdge(), target_address: "0x9000104" },
+        ],
+        unresolved_calls: [],
+      },
+    };
+    const svdRes = await reconstructProcedureHardwareInteractions(
+      { execute: () => Promise.resolve(ok(holeExecution)) },
+      {
+        procedure: "sparse_access",
+        architecture: "arm64",
+        svd_xml: `<device><name>Arm64Sparse</name><peripherals>
+          <peripheral>
+            <name>UART0</name>
+            <baseAddress>0x9000000</baseAddress>
+            <addressBlock><offset>0x100</offset><size>0x100</size></addressBlock>
+            <registers>
+              <register><name>DR</name><addressOffset>0x104</addressOffset></register>
+            </registers>
+          </peripheral>
+        </peripherals></device>`,
+      },
+    );
+    if (!svdRes.ok) throw svdRes.error;
+    expect(svdRes.value.mmioAccessCount).toBe(1);
+    expect(svdRes.value.nonMmioAccessCount).toBe(1);
+    expect(svdRes.value.peripheralBlocks).toHaveLength(1);
+    expect(svdRes.value.peripheralBlocks[0]?.socPeripheralName).toBe("UART0");
+  });
 });

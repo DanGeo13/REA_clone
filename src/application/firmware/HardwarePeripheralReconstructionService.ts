@@ -200,6 +200,8 @@ const enrichBlock = (
   ctx: EnrichBlockContext,
 ): ReconstructedPeripheralBlock => {
   const matchedNames = new Set<string>();
+  const matchedCustomControllerIds = new Set<string>();
+  const matchedSocNames = new Set<string>();
   let primaryBus: string | null = null;
   let blockBasis: ControllerNameBasis = controllerNameBasis(false);
 
@@ -210,6 +212,9 @@ const enrichBlock = (
         : null;
     if (customHit !== null && customHit.kind === "matched") {
       matchedNames.add(customHit.peripheral.name);
+      matchedCustomControllerIds.add(
+        customHit.peripheral.controllerId ?? customHit.peripheral.name,
+      );
       primaryBus = customHit.peripheral.bus;
       blockBasis = "explicit_profile";
       continue;
@@ -230,11 +235,22 @@ const enrichBlock = (
         null;
       if (def !== null) {
         matchedNames.add(def.name);
+        matchedSocNames.add(def.name);
         primaryBus = def.bus;
         if (blockBasis === "observed_address") blockBasis = "chip_manual";
       }
     }
   }
+
+  const customDeviceIds = new Set(
+    (ctx.customProfile?.devices ?? []).map((device) => device.id),
+  );
+  const customBindingByDeviceId = new Map(
+    (ctx.customProfile?.deviceBindings ?? []).map((binding) => [
+      binding.deviceId,
+      binding.controllerId,
+    ]),
+  );
 
   return {
     ...block,
@@ -243,13 +259,30 @@ const enrichBlock = (
     socPeripheralNameBasis: blockBasis,
     socPeripheralBus: primaryBus,
     boardDevices: sortAttachments(
-      ctx.activeDevices.filter(
-        (device) =>
+      ctx.activeDevices.filter((device) => {
+        if (customDeviceIds.has(device.id)) {
+          if (ctx.customProfile?.deviceBindings !== undefined) {
+            const boundControllerId = customBindingByDeviceId.get(device.id);
+            return (
+              boundControllerId !== undefined &&
+              matchedCustomControllerIds.has(boundControllerId)
+            );
+          }
+          return (
+            device.peripheralName !== null &&
+            matchedCustomControllerIds.has(device.peripheralName)
+          );
+        }
+        return (
           device.peripheralName !== null &&
-          matchedNames.has(device.peripheralName),
-      ),
+          matchedSocNames.has(device.peripheralName)
+        );
+      }),
     ),
-    boardDrivers: boardDriversForControllers(ctx.activeDrivers, matchedNames),
+    boardDrivers: boardDriversForControllers(
+      ctx.activeDrivers,
+      matchedSocNames,
+    ),
   };
 };
 

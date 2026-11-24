@@ -611,4 +611,118 @@ describe("CMSIS-SVD XML comments and iterative traversal", () => {
       { name: "GPIOC", base: "0x40020800", reg: "GPIOC_ODR" },
     ]);
   });
+
+  it("bounds expanded SVD description character growth before allocating repeated strings", () => {
+    const bigDesc = "x".repeat(65536);
+    const parsed = parseCmsisSvd(`
+      <device><name>TextBomb</name><peripherals>
+        <peripheral>
+          <name>P0</name>
+          <baseAddress>0x40000000</baseAddress>
+          <registers>
+            <cluster>
+              <dim>32</dim>
+              <dimIncrement>0x1000</dimIncrement>
+              <name>CH%s</name>
+              <addressOffset>0x0</addressOffset>
+              <register>
+                <dim>256</dim>
+                <dimIncrement>0x4</dimIncrement>
+                <name>REG%s</name>
+                <description>${bigDesc}</description>
+                <addressOffset>0x0</addressOffset>
+              </register>
+            </cluster>
+          </registers>
+        </peripheral>
+      </peripherals></device>
+    `);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.error).toContain("exceeds maximum 16 MiB character budget");
+    }
+  });
+
+  it("inherits register and cluster derivedFrom bit-widths without spilling into neighboring peripherals", () => {
+    const parsed = parseCmsisSvd(`
+      <device><name>RegDerivedSvd</name><size>32</size><peripherals>
+        <peripheral>
+          <name>P0</name>
+          <baseAddress>0x1000</baseAddress>
+          <registers>
+            <register><name>R0</name><addressOffset>0x0</addressOffset><size>8</size></register>
+            <register derivedFrom="R0"><name>R1</name><addressOffset>0x1</addressOffset></register>
+          </registers>
+        </peripheral>
+        <peripheral>
+          <name>P1</name>
+          <baseAddress>0x1002</baseAddress>
+          <registers>
+            <cluster><name>C0</name><addressOffset>0x0</addressOffset><size>8</size>
+              <register><name>B0</name><addressOffset>0x0</addressOffset></register>
+            </cluster>
+            <cluster derivedFrom="C0"><name>C1</name><addressOffset>0x1</addressOffset></cluster>
+          </registers>
+        </peripheral>
+      </peripherals></device>
+    `);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.peripherals[0]?.sizeBytes).toBe(2);
+    expect(parsed.value.peripherals[1]?.sizeBytes).toBe(2);
+    const p1Hit = lookupCustomPeripheral(0x1002n, parsed.value);
+    expect(p1Hit?.kind).toBe("matched");
+    if (p1Hit?.kind === "matched") {
+      expect(p1Hit.peripheral.name).toBe("P1");
+      expect(p1Hit.register?.mnemonic).toBe("P1_C0_B0");
+    }
+    const c1Hit = lookupCustomPeripheral(0x1003n, parsed.value);
+    expect(c1Hit?.kind === "matched" ? c1Hit.register?.mnemonic : null).toBe(
+      "P1_C1_B0",
+    );
+
+    const missingDerived = parseCmsisSvd(`
+      <device><name>BadRegDerived</name><peripherals>
+        <peripheral>
+          <name>P0</name>
+          <baseAddress>0x1000</baseAddress>
+          <registers>
+            <register derivedFrom="NO_SUCH_REG"><name>R1</name><addressOffset>0x0</addressOffset></register>
+          </registers>
+        </peripheral>
+      </peripherals></device>
+    `);
+    expect(missingDerived.ok).toBe(false);
+  });
+
+  it("preserves non-zero and disjoint SVD addressBlock intervals without matching gaps", () => {
+    const parsed = parseCmsisSvd(`
+      <device><name>DisjointSvd</name><peripherals>
+        <peripheral>
+          <name>SPARSE_CTRL</name>
+          <baseAddress>0x9000000</baseAddress>
+          <addressBlock><offset>0x100</offset><size>0x100</size><usage>registers</usage></addressBlock>
+          <addressBlock><offset>0x200</offset><size>0x200</size><usage>reserved</usage></addressBlock>
+          <addressBlock><offset>0x400</offset><size>0x100</size><usage>registers</usage></addressBlock>
+          <registers>
+            <register><name>CFG</name><addressOffset>0x104</addressOffset></register>
+            <register><name>STAT</name><addressOffset>0x400</addressOffset></register>
+          </registers>
+        </peripheral>
+      </peripherals></device>
+    `);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    // Undeclared prefix 0x000..0x0ff and reserved hole 0x200..0x3ff do not match
+    expect(lookupCustomPeripheral(0x9000050n, parsed.value)).toBeNull();
+    expect(lookupCustomPeripheral(0x9000250n, parsed.value)).toBeNull();
+    const hitA = lookupCustomPeripheral(0x9000104n, parsed.value);
+    const hitB = lookupCustomPeripheral(0x9000400n, parsed.value);
+    expect(hitA?.kind === "matched" ? hitA.register?.mnemonic : null).toBe(
+      "SPARSE_CTRL_CFG",
+    );
+    expect(hitB?.kind === "matched" ? hitB.register?.mnemonic : null).toBe(
+      "SPARSE_CTRL_STAT",
+    );
+  });
 });

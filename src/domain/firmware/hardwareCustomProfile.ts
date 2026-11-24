@@ -22,15 +22,27 @@ export interface CustomPeripheralRegister {
   readonly name: string;
 }
 
+export interface CustomPeripheralAddressBlock {
+  readonly offset: bigint;
+  readonly sizeBytes: number;
+}
+
 export interface CustomPeripheralWindow {
   readonly name: string;
+  readonly controllerId?: string | null;
   readonly baseAddress: string;
   readonly baseAddressValue: bigint;
   readonly sizeBytes: number;
+  readonly addressBlocks?: readonly CustomPeripheralAddressBlock[];
   readonly bus: string | null;
   readonly compatible: readonly string[];
   readonly status: string | null;
   readonly registers: readonly CustomPeripheralRegister[];
+}
+
+export interface CustomDeviceControllerBinding {
+  readonly deviceId: string;
+  readonly controllerId: string;
 }
 
 export interface CustomHardwareProfile {
@@ -41,6 +53,7 @@ export interface CustomHardwareProfile {
   readonly memory: readonly BoardMemoryWindow[];
   readonly peripherals: readonly CustomPeripheralWindow[];
   readonly devices: readonly BoardDeviceAttachment[];
+  readonly deviceBindings?: readonly CustomDeviceControllerBinding[];
   readonly limitations: readonly string[];
 }
 
@@ -50,11 +63,18 @@ const customPeripheralRegisterSchema = z.strictObject({
   name: z.string().min(1),
 });
 
+const customPeripheralAddressBlockSchema = z.strictObject({
+  offset: z.bigint().nonnegative(),
+  sizeBytes: z.number().int().positive(),
+});
+
 const customPeripheralWindowSchema = z.strictObject({
   name: z.string().min(1),
+  controllerId: z.string().nullable().optional(),
   baseAddress: z.string(),
   baseAddressValue: z.bigint().nonnegative(),
   sizeBytes: z.number().int().positive(),
+  addressBlocks: z.array(customPeripheralAddressBlockSchema).optional(),
   bus: z.string().nullable(),
   compatible: z.array(z.string()),
   status: z.string().nullable(),
@@ -99,6 +119,14 @@ export const customHardwareProfileSchema = z.strictObject({
       partNames: z.array(z.string()).optional(),
     }),
   ),
+  deviceBindings: z
+    .array(
+      z.strictObject({
+        deviceId: z.string().min(1),
+        controllerId: z.string().min(1),
+      }),
+    )
+    .optional(),
   limitations: z.array(z.string()),
 });
 
@@ -147,41 +175,80 @@ export const lookupCustomPeripheral = (
   address: bigint,
   profile: CustomHardwareProfile,
 ): CustomPeripheralLookupResult | null => {
-  const containing = profile.peripherals.filter((peripheral) => {
+  const containing: {
+    readonly peripheral: CustomPeripheralWindow;
+    readonly matchedSize: number;
+    readonly matchedStart: bigint;
+  }[] = [];
+
+  for (const peripheral of profile.peripherals) {
+    if (peripheral.addressBlocks !== undefined) {
+      let bestBlock: CustomPeripheralAddressBlock | undefined;
+      for (const block of peripheral.addressBlocks) {
+        const start = peripheral.baseAddressValue + block.offset;
+        const end = start + BigInt(block.sizeBytes);
+        if (address >= start && address < end) {
+          if (
+            bestBlock === undefined ||
+            block.sizeBytes < bestBlock.sizeBytes
+          ) {
+            bestBlock = block;
+          }
+        }
+      }
+      if (bestBlock !== undefined) {
+        containing.push({
+          peripheral,
+          matchedSize: bestBlock.sizeBytes,
+          matchedStart: peripheral.baseAddressValue + bestBlock.offset,
+        });
+      }
+      continue;
+    }
     const end = peripheral.baseAddressValue + BigInt(peripheral.sizeBytes);
-    return address >= peripheral.baseAddressValue && address < end;
-  });
+    if (address >= peripheral.baseAddressValue && address < end) {
+      containing.push({
+        peripheral,
+        matchedSize: peripheral.sizeBytes,
+        matchedStart: peripheral.baseAddressValue,
+      });
+    }
+  }
   if (containing.length === 0) return null;
 
-  let minSize = containing[0]?.sizeBytes ?? 0;
+  let minSize = containing[0]?.matchedSize ?? 0;
   for (const candidate of containing) {
-    if (candidate.sizeBytes < minSize) minSize = candidate.sizeBytes;
+    if (candidate.matchedSize < minSize) minSize = candidate.matchedSize;
   }
-  const narrowest = containing.filter((item) => item.sizeBytes === minSize);
+  const narrowest = containing.filter((item) => item.matchedSize === minSize);
   const selected = narrowest[0];
   if (selected === undefined) return null;
   if (narrowest.length > 1) {
-    let baseAddressValue = selected.baseAddressValue;
+    let baseAddressValue = selected.matchedStart;
     for (const item of narrowest) {
-      if (item.baseAddressValue > baseAddressValue) {
-        baseAddressValue = item.baseAddressValue;
+      if (item.matchedStart > baseAddressValue) {
+        baseAddressValue = item.matchedStart;
       }
     }
     return {
       kind: "ambiguous",
       baseAddress: `0x${baseAddressValue.toString(16)}`,
       baseAddressValue,
-      candidates: narrowest,
+      candidates: narrowest.map((item) => item.peripheral),
     };
   }
 
-  const offset = address - selected.baseAddressValue;
-  const keyedRegs = keyedBy(selected.registers, (entry) =>
+  const offset = address - selected.peripheral.baseAddressValue;
+  const keyedRegs = keyedBy(selected.peripheral.registers, (entry) =>
     entry.offset.toString(16),
   );
   const register =
     firstKeyed(keyedRegs, offset.toString(16), SVD_REGISTER_PRECEDENCE) ?? null;
-  return { kind: "matched", peripheral: selected, register };
+  return {
+    kind: "matched",
+    peripheral: selected.peripheral,
+    register,
+  };
 };
 
 interface RangeTuple {
@@ -418,6 +485,14 @@ export const hardwareProfileFromDevicetree = (
   const devices: BoardDeviceAttachment[] = [];
   const limitations = [...dt.limitations];
   const controllerNameByPath = new Map<string, string>();
+  const deviceBindings: CustomDeviceControllerBinding[] = [];
+  const pendingBusChildren: {
+    readonly node: Devicetree["nodes"][number];
+    readonly parentPath: string;
+    readonly firstAddr: string;
+    readonly compatible: readonly string[];
+    readonly status: string | null;
+  }[] = [];
 
   for (const node of dt.nodes) {
     if (
@@ -450,15 +525,12 @@ export const hardwareProfileFromDevicetree = (
             `Devicetree node '${node.path}' has invalid reg address '${firstAddr}'`,
           );
         }
-        devices.push({
-          id: node.path,
-          name: compatible[0] ?? nodeShortName(node.path),
-          kind: "listed_resource",
-          peripheralName: controllerNameByPath.get(node.parent) ?? null,
-          role: `Devicetree child at ${firstAddr}`,
-          kconfigDefault: status === null || status === "okay",
-          pins: [],
-          evidence: `DTB ${dt.artifact.sha256} node ${node.path}`,
+        pendingBusChildren.push({
+          node,
+          parentPath: node.parent,
+          firstAddr,
+          compatible,
+          status,
         });
       }
       continue;
@@ -504,11 +576,14 @@ export const hardwareProfileFromDevicetree = (
       const baseLabel = nodeShortName(node.path);
       const name =
         regEntries.length > 1
-          ? `${baseLabel}_${regIndex}`
+          ? `${baseLabel}@0x${cpuAddr.toString(16)}#${regIndex}`
           : `${baseLabel}@0x${cpuAddr.toString(16)}`;
-      if (regIndex === 0) controllerNameByPath.set(node.path, name);
+      if (!controllerNameByPath.has(node.path)) {
+        controllerNameByPath.set(node.path, name);
+      }
       peripherals.push({
         name,
+        controllerId: node.path,
         baseAddress: `0x${cpuAddr.toString(16)}`,
         baseAddressValue: cpuAddr,
         sizeBytes,
@@ -520,6 +595,26 @@ export const hardwareProfileFromDevicetree = (
     }
   }
 
+  for (const child of pendingBusChildren) {
+    const controllerName = controllerNameByPath.get(child.parentPath) ?? null;
+    if (controllerName !== null) {
+      deviceBindings.push({
+        deviceId: child.node.path,
+        controllerId: child.parentPath,
+      });
+    }
+    devices.push({
+      id: child.node.path,
+      name: child.compatible[0] ?? nodeShortName(child.node.path),
+      kind: "listed_resource",
+      peripheralName: controllerName,
+      role: `Devicetree child at ${child.firstAddr}`,
+      kconfigDefault: child.status === null || child.status === "okay",
+      pins: [],
+      evidence: `DTB ${dt.artifact.sha256} node ${child.node.path}`,
+    });
+  }
+
   return ok({
     id: dt.summary.model ?? dt.summary.compatible?.[0] ?? dt.artifact.path,
     sourceKind: "devicetree",
@@ -528,6 +623,7 @@ export const hardwareProfileFromDevicetree = (
     memory,
     peripherals,
     devices,
+    deviceBindings,
     limitations,
   });
 };
@@ -537,12 +633,27 @@ const MAX_SVD_XML_NODES = 500_000;
 const MAX_SVD_DIM_ELEMENTS = 1024;
 const MAX_SVD_TOTAL_REGISTERS = 32768;
 const MAX_SVD_EXPANSION_STEPS = 65536;
+const MAX_SVD_EXPANDED_TEXT_CHARS = 16 * 1024 * 1024;
 const MAX_SVD_CLUSTER_DEPTH = 64;
 
 interface SvdExpansionBudget {
   remainingRegisters: number;
   remainingSteps: number;
+  remainingTextChars: number;
 }
+
+const chargeSvdTextBudget = (
+  budget: SvdExpansionBudget,
+  chars: number,
+): Result<null, string> => {
+  budget.remainingTextChars -= chars;
+  if (budget.remainingTextChars < 0) {
+    return err(
+      "CMSIS-SVD expanded text exceeds maximum 16 MiB character budget",
+    );
+  }
+  return ok(null);
+};
 
 const elementTagLower = (element: Element): string =>
   (element.localName ?? element.tagName).toLowerCase();
@@ -654,10 +765,222 @@ interface RawSvdRegister extends CustomPeripheralRegister {
   readonly explicitByteWidth: number | null;
 }
 
+const normalizedSvdDescription = (
+  element: Element,
+  cache: WeakMap<Element, string | null>,
+): string | null => {
+  if (cache.has(element)) return cache.get(element) ?? null;
+  const raw = directChildText(element, "description");
+  const normalized = raw === null ? null : raw.replace(/\s+/gu, " ");
+  cache.set(element, normalized);
+  return normalized;
+};
+
+const svdElementLookupKeys = (element: Element): readonly string[] => {
+  const rawName = directChildText(element, "name");
+  if (rawName === null) return [];
+  const dimRaw = directChildText(element, "dim");
+  const dimVal = dimRaw === null ? null : parseSvdInt(dimRaw);
+  const dimInc = parseSvdInt(directChildText(element, "dimincrement"));
+  if (
+    dimVal === null ||
+    dimVal <= 0n ||
+    dimVal > BigInt(MAX_SVD_DIM_ELEMENTS) ||
+    dimInc === null
+  ) {
+    return [rawName];
+  }
+  const count = Number(dimVal);
+  const tokens = expandDimIndices(count, directChildText(element, "dimindex"));
+  const keys = new Set<string>([rawName]);
+  for (let idx = 0; idx < count; idx += 1) {
+    keys.add(formatDimName(rawName, tokens[idx] ?? String(idx)));
+  }
+  return [...keys];
+};
+
+const findSvdChildByName = (
+  children: readonly Element[],
+  targetName: string,
+): Element | undefined => {
+  for (const child of children) {
+    const tag = elementTagLower(child);
+    if (tag !== "register" && tag !== "cluster") continue;
+    if (svdElementLookupKeys(child).includes(targetName)) return child;
+  }
+  return undefined;
+};
+
+const lookupSvdDerivedElement = (
+  ref: string,
+  currentChildren: readonly Element[],
+  rootRegistersEl: Element,
+  periphRegistersByName: ReadonlyMap<string, Element>,
+): Element | null => {
+  if (!ref.includes(".")) {
+    return (
+      findSvdChildByName(currentChildren, ref) ??
+      findSvdChildByName(directChildElements(rootRegistersEl), ref) ??
+      null
+    );
+  }
+  const parts = ref.split(".").filter((part) => part.length > 0);
+  if (parts.length === 0) return null;
+  let container: Element | undefined;
+  let startIndex = 0;
+  const localFirst = findSvdChildByName(
+    directChildElements(rootRegistersEl),
+    parts[0]!,
+  );
+  if (localFirst !== undefined && elementTagLower(localFirst) === "cluster") {
+    if (parts.length === 1) return localFirst;
+    container = localFirst;
+    startIndex = 1;
+  } else {
+    container = periphRegistersByName.get(parts[0]!);
+    startIndex = 1;
+  }
+  if (container === undefined || startIndex >= parts.length) return null;
+  let cursorEl: Element | undefined = container;
+  for (let idx = startIndex; idx < parts.length; idx += 1) {
+    const match = findSvdChildByName(
+      directChildElements(cursorEl),
+      parts[idx]!,
+    );
+    if (match === undefined) return null;
+    if (idx < parts.length - 1) {
+      if (elementTagLower(match) !== "cluster") return null;
+      cursorEl = match;
+    } else {
+      return match;
+    }
+  }
+  return null;
+};
+
+const mergeClusterChildren = (
+  chainOldestFirst: readonly Element[],
+): readonly Element[] => {
+  if (chainOldestFirst.length === 1) {
+    return directChildElements(chainOldestFirst[0]!).filter((el) => {
+      const t = elementTagLower(el);
+      return t === "register" || t === "cluster";
+    });
+  }
+  const merged: Element[] = [];
+  const indexByName = new Map<string, number>();
+  for (const clusterEl of chainOldestFirst) {
+    for (const child of directChildElements(clusterEl)) {
+      const tag = elementTagLower(child);
+      if (tag !== "register" && tag !== "cluster") continue;
+      const childName = directChildText(child, "name");
+      if (childName === null) continue;
+      const existingIdx = indexByName.get(childName);
+      if (existingIdx !== undefined) {
+        merged[existingIdx] = child;
+      } else {
+        indexByName.set(childName, merged.length);
+        merged.push(child);
+      }
+    }
+  }
+  return merged;
+};
+
+const resolveSvdTreeTemplate = (
+  itemEl: Element,
+  tag: "register" | "cluster",
+  rawName: string,
+  ctx: {
+    readonly currentChildren: readonly Element[];
+    readonly rootRegistersEl: Element;
+    readonly periphRegistersByName: ReadonlyMap<string, Element>;
+    readonly descCache: WeakMap<Element, string | null>;
+    readonly budget: SvdExpansionBudget;
+  },
+): Result<
+  {
+    readonly explicitByteWidth: number | null;
+    readonly description: string | null;
+    readonly clusterChildren: readonly Element[];
+  },
+  string
+> => {
+  const firstDerived = elementAttributeCaseInsensitive(itemEl, "derivedfrom");
+  if (firstDerived === null) {
+    return ok({
+      explicitByteWidth: parseSvdBitWidthToBytes(
+        directChildText(itemEl, "size"),
+      ),
+      description: normalizedSvdDescription(itemEl, ctx.descCache),
+      clusterChildren:
+        tag === "cluster"
+          ? directChildElements(itemEl).filter((el) => {
+              const t = elementTagLower(el);
+              return t === "register" || t === "cluster";
+            })
+          : [],
+    });
+  }
+
+  const chainNewestFirst: Element[] = [itemEl];
+  const visited = new Set<Element>([itemEl]);
+  let nextRef: string | null = firstDerived;
+
+  while (nextRef !== null) {
+    ctx.budget.remainingSteps -= 1;
+    if (ctx.budget.remainingSteps < 0) {
+      return err(
+        `CMSIS-SVD expanded cluster/register count exceeds maximum ${MAX_SVD_EXPANSION_STEPS} steps`,
+      );
+    }
+    if (chainNewestFirst.length > MAX_SVD_CLUSTER_DEPTH) {
+      return err(
+        `CMSIS-SVD ${tag} '${rawName}' derivedFrom chain exceeds maximum depth ${MAX_SVD_CLUSTER_DEPTH}`,
+      );
+    }
+    const target = lookupSvdDerivedElement(
+      nextRef,
+      ctx.currentChildren,
+      ctx.rootRegistersEl,
+      ctx.periphRegistersByName,
+    );
+    if (target === null || elementTagLower(target) !== tag) {
+      return err(
+        `CMSIS-SVD ${tag} '${rawName}' references unknown derivedFrom '${nextRef}'`,
+      );
+    }
+    if (visited.has(target)) {
+      return err(
+        `CMSIS-SVD ${tag} '${rawName}' has cyclic derivedFrom '${nextRef}'`,
+      );
+    }
+    visited.add(target);
+    chainNewestFirst.push(target);
+    nextRef = elementAttributeCaseInsensitive(target, "derivedfrom");
+  }
+
+  let explicitByteWidth: number | null = null;
+  let description: string | null = null;
+  for (const el of chainNewestFirst) {
+    explicitByteWidth ??= parseSvdBitWidthToBytes(directChildText(el, "size"));
+    description ??= normalizedSvdDescription(el, ctx.descCache);
+  }
+  const clusterChildren =
+    tag === "cluster"
+      ? mergeClusterChildren([...chainNewestFirst].reverse())
+      : [];
+  return ok({
+    explicitByteWidth,
+    description,
+    clusterChildren,
+  });
+};
+
 type SvdRegisterWorkItem =
   | {
       readonly kind: "container";
-      readonly element: Element;
+      readonly children: readonly Element[];
       readonly baseOffset: bigint;
       readonly prefix: string;
       readonly inheritedByteWidth: number | null;
@@ -673,13 +996,15 @@ const parseSvdRegisterTree = (
   ctx: {
     readonly limitations: string[];
     readonly budget: SvdExpansionBudget;
+    readonly periphRegistersByName: ReadonlyMap<string, Element>;
+    readonly descCache: WeakMap<Element, string | null>;
   },
 ): Result<RawSvdRegister[], string> => {
   const results: RawSvdRegister[] = [];
   const stack: SvdRegisterWorkItem[] = [
     {
       kind: "container",
-      element: registersContainer,
+      children: directChildElements(registersContainer),
       baseOffset: 0n,
       prefix: "",
       inheritedByteWidth: null,
@@ -700,16 +1025,25 @@ const parseSvdRegisterTree = (
     }
 
     const emitted: SvdRegisterWorkItem[] = [];
-    for (const itemEl of directChildElements(work.element)) {
+    for (const itemEl of work.children) {
       const tag = elementTagLower(itemEl);
       if (tag !== "cluster" && tag !== "register") continue;
 
       const rawName = directChildText(itemEl, "name");
       const offset = parseSvdInt(directChildText(itemEl, "addressoffset"));
       if (rawName === null || offset === null) continue;
+
+      const resolvedTemplate = resolveSvdTreeTemplate(itemEl, tag, rawName, {
+        currentChildren: work.children,
+        rootRegistersEl: registersContainer,
+        periphRegistersByName: ctx.periphRegistersByName,
+        descCache: ctx.descCache,
+        budget: ctx.budget,
+      });
+      if (!resolvedTemplate.ok) return resolvedTemplate;
+
       const itemByteWidth =
-        parseSvdBitWidthToBytes(directChildText(itemEl, "size")) ??
-        work.inheritedByteWidth;
+        resolvedTemplate.value.explicitByteWidth ?? work.inheritedByteWidth;
 
       const dimRaw = directChildText(itemEl, "dim");
       const dimVal = dimRaw === null ? null : parseSvdInt(dimRaw);
@@ -742,6 +1076,19 @@ const parseSvdRegisterTree = (
             `CMSIS-SVD expanded register count exceeds maximum ${MAX_SVD_TOTAL_REGISTERS} registers`,
           );
         }
+        const descLen =
+          resolvedTemplate.value.description?.length ?? rawName.length;
+        const textCharge = chargeSvdTextBudget(
+          ctx.budget,
+          count * (work.prefix.length + rawName.length + descLen + 8),
+        );
+        if (!textCharge.ok) return textCharge;
+      } else {
+        const textCharge = chargeSvdTextBudget(
+          ctx.budget,
+          count * (work.prefix.length + rawName.length + 4),
+        );
+        if (!textCharge.ok) return textCharge;
       }
 
       const step = dimInc ?? 0n;
@@ -749,7 +1096,7 @@ const parseSvdRegisterTree = (
         dimVal === null
           ? [""]
           : expandDimIndices(count, directChildText(itemEl, "dimindex"));
-      const rawDesc = directChildText(itemEl, "description");
+      const normalizedDesc = resolvedTemplate.value.description;
 
       for (let idx = 0; idx < count; idx += 1) {
         const token = tokens[idx] ?? String(idx);
@@ -760,14 +1107,17 @@ const parseSvdRegisterTree = (
           const cleanPrefix = instanceName.replace(/[^\w]/gu, "_");
           emitted.push({
             kind: "container",
-            element: itemEl,
+            children: resolvedTemplate.value.clusterChildren,
             baseOffset: instanceOffset,
             prefix: `${work.prefix}${cleanPrefix}_`,
             inheritedByteWidth: itemByteWidth,
             depth: work.depth + 1,
           });
         } else {
-          const desc = (rawDesc ?? instanceName).replace(/\s+/gu, " ");
+          const desc =
+            normalizedDesc !== null
+              ? normalizedDesc
+              : instanceName.replace(/\s+/gu, " ");
           emitted.push({
             kind: "register",
             value: {
@@ -792,7 +1142,8 @@ interface RawSvdPeripheral {
   readonly name: string;
   readonly derivedFrom: string | null;
   readonly base: bigint;
-  readonly declaredSize: number | null;
+  readonly hasDeclaredAddressBlocks: boolean;
+  readonly addressBlocks: readonly CustomPeripheralAddressBlock[];
   readonly declaredByteWidth: number | null;
   readonly group: string | null;
   readonly registers: readonly RawSvdRegister[];
@@ -800,7 +1151,8 @@ interface RawSvdPeripheral {
 
 interface ResolvedSvdEntry {
   readonly window: CustomPeripheralWindow;
-  readonly declaredSize: number | null;
+  readonly hasDeclaredAddressBlocks: boolean;
+  readonly addressBlocks: readonly CustomPeripheralAddressBlock[];
   readonly defaultRegBytes: number;
   readonly rawRegisters: readonly RawSvdRegister[];
 }
@@ -833,6 +1185,15 @@ const buildResolvedSvdEntry = (
       );
     }
   }
+  if (sourceRegs.length > 0) {
+    let projectedChars = 0;
+    for (const reg of sourceRegs) {
+      projectedChars +=
+        item.name.length * 2 + reg.mnemonic.length + reg.name.length + 4;
+    }
+    const textCharge = chargeSvdTextBudget(budget, projectedChars);
+    if (!textCharge.ok) return textCharge;
+  }
 
   const parentMnemonicPrefix =
     parentWindow === null ? null : `${parentWindow.name}_`;
@@ -864,13 +1225,35 @@ const buildResolvedSvdEntry = (
     );
   }
   const inferredSize = maxRegEnd > 0n ? Number(maxRegEnd) : 0x400;
-  const declaredSize = item.declaredSize ?? parentEntry?.declaredSize ?? null;
-  const sizeBytes = declaredSize ?? inferredSize;
+  const hasDeclaredAddressBlocks =
+    item.hasDeclaredAddressBlocks ||
+    (parentEntry?.hasDeclaredAddressBlocks ?? false);
+  const addressBlocks = item.hasDeclaredAddressBlocks
+    ? item.addressBlocks
+    : (parentEntry?.addressBlocks ?? []);
+
+  let maxBlockEnd = 0;
+  for (const block of addressBlocks) {
+    const absEnd = item.base + block.offset + BigInt(block.sizeBytes);
+    if (absEnd > 0xffffffffffffffffn) {
+      return err(
+        `CMSIS-SVD peripheral '${item.name}' addressBlock exceeds 64-bit address bounds`,
+      );
+    }
+    const relEnd = Number(block.offset) + block.sizeBytes;
+    if (relEnd > maxBlockEnd) maxBlockEnd = relEnd;
+  }
+  const sizeBytes = hasDeclaredAddressBlocks
+    ? Math.max(1, maxBlockEnd)
+    : inferredSize;
+
   const window: CustomPeripheralWindow = {
     name: item.name,
+    controllerId: item.name,
     baseAddress: `0x${item.base.toString(16)}`,
     baseAddressValue: item.base,
     sizeBytes,
+    ...(hasDeclaredAddressBlocks ? { addressBlocks } : {}),
     bus: item.group ?? parentWindow?.bus ?? null,
     compatible: [],
     status: "okay",
@@ -878,7 +1261,8 @@ const buildResolvedSvdEntry = (
   };
   return ok({
     window,
-    declaredSize,
+    hasDeclaredAddressBlocks,
+    addressBlocks,
     defaultRegBytes,
     rawRegisters,
   });
@@ -992,13 +1376,27 @@ export const parseCmsisSvd = (
   const budget: SvdExpansionBudget = {
     remainingRegisters: MAX_SVD_TOTAL_REGISTERS,
     remainingSteps: MAX_SVD_EXPANSION_STEPS,
+    remainingTextChars: MAX_SVD_EXPANDED_TEXT_CHARS,
   };
+  const descCache = new WeakMap<Element, string | null>();
+  const peripheralElements = directChildElements(peripheralsEl, "peripheral");
+  const periphRegistersByName = new Map<string, Element>();
+  for (const periphEl of peripheralElements) {
+    const regsEl = directChildElements(periphEl, "registers")[0];
+    if (regsEl === undefined) continue;
+    for (const key of svdElementLookupKeys(periphEl)) {
+      if (!periphRegistersByName.has(key)) {
+        periphRegistersByName.set(key, regsEl);
+      }
+    }
+  }
+
   const limitations: string[] = [];
   const rawList: RawSvdPeripheral[] = [];
   const templateAliases = new Map<string, string>();
   let skippedInvalidDimPeripheral = false;
 
-  for (const periphEl of directChildElements(peripheralsEl, "peripheral")) {
+  for (const periphEl of peripheralElements) {
     const name = directChildText(periphEl, "name");
     const base = parseSvdInt(directChildText(periphEl, "baseaddress"));
     if (name === null || base === null) continue;
@@ -1037,16 +1435,31 @@ export const parseCmsisSvd = (
       "derivedfrom",
     );
 
-    let totalSpan: number | null = null;
-    for (const abEl of directChildElements(periphEl, "addressblock")) {
-      const blockOffset = parseSvdInt(directChildText(abEl, "offset")) ?? 0n;
+    const abElements = directChildElements(periphEl, "addressblock");
+    const hasDeclaredAddressBlocks = abElements.length > 0;
+    const addressBlocks: CustomPeripheralAddressBlock[] = [];
+    for (const abEl of abElements) {
+      const offsetText = directChildText(abEl, "offset");
+      const blockOffset = offsetText === null ? 0n : parseSvdInt(offsetText);
       const blockSize = parseSvdInt(directChildText(abEl, "size"));
-      if (blockSize !== null && blockSize > 0n) {
-        const end = Number(blockOffset + blockSize);
-        if (Number.isSafeInteger(end) && end > (totalSpan ?? 0)) {
-          totalSpan = end;
-        }
+      if (blockOffset === null || blockSize === null || blockSize <= 0n) {
+        return err(
+          `CMSIS-SVD peripheral '${name}' has invalid addressBlock offset or size`,
+        );
       }
+      const end = Number(blockOffset + blockSize);
+      const sizeNum = Number(blockSize);
+      if (!Number.isSafeInteger(end) || !Number.isSafeInteger(sizeNum)) {
+        return err(
+          `CMSIS-SVD peripheral '${name}' addressBlock exceeds safe integer bounds`,
+        );
+      }
+      const usage = directChildText(abEl, "usage")?.toLowerCase() ?? null;
+      if (usage === "reserved") continue;
+      addressBlocks.push({
+        offset: blockOffset,
+        sizeBytes: sizeNum,
+      });
     }
 
     let registers: RawSvdRegister[] = [];
@@ -1055,6 +1468,8 @@ export const parseCmsisSvd = (
       const parsedRegs = parseSvdRegisterTree(regsEl, {
         limitations,
         budget,
+        periphRegistersByName,
+        descCache,
       });
       if (!parsedRegs.ok) return parsedRegs;
       registers = parsedRegs.value;
@@ -1093,7 +1508,8 @@ export const parseCmsisSvd = (
         name: instanceName,
         derivedFrom,
         base: instanceBase,
-        declaredSize: totalSpan,
+        hasDeclaredAddressBlocks,
+        addressBlocks,
         declaredByteWidth,
         group,
         registers,
