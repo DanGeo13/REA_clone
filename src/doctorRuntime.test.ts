@@ -20,7 +20,11 @@ import { err, ok } from "./domain/result.js";
 import { AnalysisError } from "./domain/analysisErrorBase.js";
 import { AnalysisCancelledError } from "./domain/analysisErrorCore.js";
 import { createDoctorHostFixture } from "./application/Doctor.fixture.js";
-import { runDoctor, runDoctorOwned } from "./application/Doctor.js";
+import {
+  runDoctor,
+  runDoctorOwned,
+  systemDoctorHost,
+} from "./application/Doctor.js";
 import { MAC_HOPPER_SYSTEM_LAUNCHER } from "./hopperPaths/MacHopperPaths.js";
 import { waitForAbortable } from "./process/AbortablePromise.js";
 import { AnalysisCleanupLease } from "./resources/AnalysisCleanupLease.js";
@@ -1439,3 +1443,13 @@ test.each([
     ).toBe(expected);
   },
 );
+
+it("composes the macOS Hopper Python probe outside the shared doctor host", async () => {
+  const composed = createSystemDoctorHost({});
+  const shared = systemDoctorHost({ environment: {} });
+
+  expect(composed.macHopperPythonCheck).toBeTypeOf("function");
+  expect(shared.macHopperPythonCheck).toBeUndefined();
+  await composed.close?.();
+  await shared.close?.();
+});
