@@ -145,3 +145,68 @@ mcpTest(
     }
   },
 );
+
+mcpTest(
+  "names the per-call budget that stopped NuGet inspection as a structured limit",
+  async ({ mcp }) => {
+    const { client, session } = await connect(mcp);
+    try {
+      const root = await createTestTempDirectory("rea-nupkg-mcp-limits-");
+      const path = join(root, "Demo.Package.nupkg");
+      await writeFile(path, await nugetNupkgFixture());
+      // Expected ranges are the published schema bounds, written out literally.
+      const expected = {
+        max_file_bytes: {
+          resource: "file-size",
+          value: 16,
+          minimum: 16,
+          maximum: 536870912,
+          default_value: 67108864,
+          unit: "bytes",
+        },
+        max_entries: {
+          resource: "capacity",
+          value: 1,
+          minimum: 1,
+          maximum: 65536,
+          default_value: 4096,
+          unit: "count",
+        },
+        max_nuspec_bytes: {
+          resource: "memory",
+          value: 1,
+          minimum: 1,
+          maximum: 16777216,
+          default_value: 1048576,
+          unit: "bytes",
+        },
+      } as const;
+      for (const [parameter, bounds] of Object.entries(expected)) {
+        const response = await client.callTool({
+          name: "inspect_nuget_nupkg",
+          arguments: { path, [parameter]: bounds.value },
+        });
+        const { error } = parseMcpToolError(response);
+        expect(error, parameter).toMatchObject({
+          code: "resource_constraint",
+          retryable: false,
+          details: {
+            resource: bounds.resource,
+            limit: {
+              control_kind: "parameter",
+              parameter,
+              effective_value: bounds.value,
+              unit: bounds.unit,
+              minimum: bounds.minimum,
+              maximum: bounds.maximum,
+              default_value: bounds.default_value,
+              applies_at: "next_call",
+            },
+          },
+        });
+      }
+    } finally {
+      await session.close();
+    }
+  },
+);

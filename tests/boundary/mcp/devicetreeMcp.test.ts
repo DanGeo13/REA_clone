@@ -263,3 +263,130 @@ mcpTest("rejects relative paths and unsupported versions", async ({ mcp }) => {
     await session.close();
   }
 });
+
+mcpTest(
+  "names the per-call budget that stopped DTB inspection as a structured limit",
+  async ({ mcp }) => {
+    const session = createTestBinarySession(() => {
+      throw new Error("DTB inspection must not start an engine");
+    });
+    const client = await mcp.connect(createDtbServer(session));
+    try {
+      const root = await createTestTempDirectory("rea-dtb-mcp-limits-");
+      const path = join(root, "board.dtb");
+      await writeFile(
+        path,
+        devicetreeFixture({
+          name: "",
+          properties: { a: dtString("x"), b: dtString("y") },
+          children: [{ name: "one", children: [{ name: "two" }] }],
+        }),
+      );
+      // Expected ranges are the published schema bounds, written out literally.
+      const expected = {
+        max_file_bytes: {
+          resource: "file-size",
+          value: 40,
+          minimum: 40,
+          maximum: 16777216,
+          default_value: 4194304,
+          unit: "bytes",
+        },
+        max_nodes: {
+          resource: "capacity",
+          value: 1,
+          minimum: 1,
+          maximum: 65536,
+          default_value: 8192,
+          unit: "count",
+        },
+        max_properties: {
+          resource: "capacity",
+          value: 1,
+          minimum: 1,
+          maximum: 262144,
+          default_value: 32768,
+          unit: "count",
+        },
+        max_depth: {
+          resource: "capacity",
+          value: 1,
+          minimum: 1,
+          maximum: 256,
+          default_value: 64,
+          unit: "count",
+        },
+      } as const;
+      for (const [parameter, bounds] of Object.entries(expected)) {
+        const response = await client.callTool({
+          name: "inspect_devicetree",
+          arguments: { path, [parameter]: bounds.value },
+        });
+        const { error } = parseMcpToolError(response);
+        expect(error, parameter).toMatchObject({
+          code: "resource_constraint",
+          retryable: false,
+          details: {
+            resource: bounds.resource,
+            limit: {
+              control_kind: "parameter",
+              parameter,
+              effective_value: bounds.value,
+              unit: bounds.unit,
+              minimum: bounds.minimum,
+              maximum: bounds.maximum,
+              default_value: bounds.default_value,
+              applies_at: "next_call",
+            },
+          },
+        });
+      }
+    } finally {
+      await session.close();
+    }
+  },
+);
+
+mcpTest(
+  "reports the decoded devicetree allowance as a fixed ceiling, not a budget",
+  async ({ mcp }) => {
+    const session = createTestBinarySession(() => {
+      throw new Error("DTB inspection must not start an engine");
+    });
+    const client = await mcp.connect(createDtbServer(session));
+    try {
+      const root = await createTestTempDirectory("rea-dtb-mcp-decoded-");
+      const path = join(root, "board.dtb");
+      // A NUL-heavy string list expands past the decoded-representation allowance.
+      await writeFile(
+        path,
+        devicetreeFixture({
+          name: "",
+          properties: { compatible: Buffer.alloc(6 * 1024 * 1024) },
+        }),
+      );
+      const response = await client.callTool({
+        name: "inspect_devicetree",
+        arguments: { path, max_file_bytes: 16777216 },
+      });
+      const { error } = parseMcpToolError(response);
+      expect(error).toMatchObject({
+        code: "resource_constraint",
+        retryable: false,
+        details: {
+          resource: "memory",
+          refusal: {
+            kind: "fixed_ceiling",
+            allowance: "The devicetree decoded representation allowance",
+            limit: 33554432,
+            unit: "bytes",
+          },
+        },
+      });
+      // No per-call control raises it, so none is advertised.
+      expect(error.details).not.toHaveProperty("limit");
+    } finally {
+      await session.close();
+    }
+  },
+);
