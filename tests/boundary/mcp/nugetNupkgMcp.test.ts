@@ -11,6 +11,7 @@ import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { nugetNupkgFixture } from "../../../src/nuget/NugetNupkg.fixture.js";
 import { ZIP_ZSTANDARD_WINDOW_CEILING } from "../../../src/resources/ZipArtifactReader.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
+import { expectParameterLimitRefusals } from "../../support/mcp/expectParameterLimitRefusals.js";
 import { mcpTest, type TestMcp } from "../../support/mcp/mcpFixture.js";
 
 const nupkgContract = contractNamed(
@@ -181,30 +182,12 @@ mcpTest(
           unit: "bytes",
         },
       } as const;
-      for (const [parameter, bounds] of Object.entries(expected)) {
-        const response = await client.callTool({
-          name: "inspect_nuget_nupkg",
-          arguments: { path, [parameter]: bounds.value },
-        });
-        const { error } = parseMcpToolError(response);
-        expect(error, parameter).toMatchObject({
-          code: "resource_constraint",
-          retryable: false,
-          details: {
-            resource: bounds.resource,
-            limit: {
-              control_kind: "parameter",
-              parameter,
-              effective_value: bounds.value,
-              unit: bounds.unit,
-              minimum: bounds.minimum,
-              maximum: bounds.maximum,
-              default_value: bounds.default_value,
-              applies_at: "next_call",
-            },
-          },
-        });
-      }
+      await expectParameterLimitRefusals(
+        client,
+        "inspect_nuget_nupkg",
+        path,
+        expected,
+      );
     } finally {
       await session.close();
     }

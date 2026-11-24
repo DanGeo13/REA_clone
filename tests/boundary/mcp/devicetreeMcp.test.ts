@@ -19,6 +19,7 @@ import {
   dtString,
 } from "../../../src/domain/firmware/devicetree.fixture.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
+import { expectParameterLimitRefusals } from "../../support/mcp/expectParameterLimitRefusals.js";
 import { mcpTest } from "../../support/mcp/mcpFixture.js";
 
 const createDtbServer = (
@@ -317,30 +318,12 @@ mcpTest(
           unit: "count",
         },
       } as const;
-      for (const [parameter, bounds] of Object.entries(expected)) {
-        const response = await client.callTool({
-          name: "inspect_devicetree",
-          arguments: { path, [parameter]: bounds.value },
-        });
-        const { error } = parseMcpToolError(response);
-        expect(error, parameter).toMatchObject({
-          code: "resource_constraint",
-          retryable: false,
-          details: {
-            resource: bounds.resource,
-            limit: {
-              control_kind: "parameter",
-              parameter,
-              effective_value: bounds.value,
-              unit: bounds.unit,
-              minimum: bounds.minimum,
-              maximum: bounds.maximum,
-              default_value: bounds.default_value,
-              applies_at: "next_call",
-            },
-          },
-        });
-      }
+      await expectParameterLimitRefusals(
+        client,
+        "inspect_devicetree",
+        path,
+        expected,
+      );
     } finally {
       await session.close();
     }
