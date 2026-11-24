@@ -776,9 +776,20 @@ const normalizedSvdDescription = (
   return normalized;
 };
 
-const svdElementLookupKeys = (element: Element): readonly string[] => {
+const svdElementMatchesName = (
+  element: Element,
+  targetName: string,
+  budget: SvdExpansionBudget,
+): Result<boolean, string> => {
+  budget.remainingSteps -= 1;
+  if (budget.remainingSteps < 0) {
+    return err(
+      `CMSIS-SVD expanded peripheral/register count exceeds maximum ${MAX_SVD_EXPANSION_STEPS} steps`,
+    );
+  }
   const rawName = directChildText(element, "name");
-  if (rawName === null) return [];
+  if (rawName === null) return ok(false);
+  if (rawName === targetName) return ok(true);
   const dimRaw = directChildText(element, "dim");
   const dimVal = dimRaw === null ? null : parseSvdInt(dimRaw);
   const dimInc = parseSvdInt(directChildText(element, "dimincrement"));
@@ -788,74 +799,120 @@ const svdElementLookupKeys = (element: Element): readonly string[] => {
     dimVal > BigInt(MAX_SVD_DIM_ELEMENTS) ||
     dimInc === null
   ) {
-    return [rawName];
+    return ok(false);
   }
+  const placeholder = rawName.indexOf("%s");
+  const prefix = placeholder >= 0 ? rawName.slice(0, placeholder) : rawName;
+  if (!targetName.startsWith(prefix)) return ok(false);
   const count = Number(dimVal);
-  const tokens = expandDimIndices(count, directChildText(element, "dimindex"));
-  const keys = new Set<string>([rawName]);
-  for (let idx = 0; idx < count; idx += 1) {
-    keys.add(formatDimName(rawName, tokens[idx] ?? String(idx)));
+  budget.remainingSteps -= count;
+  if (budget.remainingSteps < 0) {
+    return err(
+      `CMSIS-SVD expanded peripheral/register count exceeds maximum ${MAX_SVD_EXPANSION_STEPS} steps`,
+    );
   }
-  return [...keys];
+  const tokens = expandDimIndices(count, directChildText(element, "dimindex"));
+  for (let idx = 0; idx < count; idx += 1) {
+    if (formatDimName(rawName, tokens[idx] ?? String(idx)) === targetName) {
+      return ok(true);
+    }
+  }
+  return ok(false);
 };
 
 const findSvdChildByName = (
   children: readonly Element[],
   targetName: string,
-): Element | undefined => {
+  budget: SvdExpansionBudget,
+): Result<Element | undefined, string> => {
   for (const child of children) {
     const tag = elementTagLower(child);
     if (tag !== "register" && tag !== "cluster") continue;
-    if (svdElementLookupKeys(child).includes(targetName)) return child;
+    const matched = svdElementMatchesName(child, targetName, budget);
+    if (!matched.ok) return matched;
+    if (matched.value) return ok(child);
   }
-  return undefined;
+  return ok(undefined);
+};
+
+const findSvdPeripheralRegistersByName = (
+  peripheralElements: readonly Element[],
+  targetName: string,
+  budget: SvdExpansionBudget,
+): Result<Element | undefined, string> => {
+  for (const periphEl of peripheralElements) {
+    const matched = svdElementMatchesName(periphEl, targetName, budget);
+    if (!matched.ok) return matched;
+    if (matched.value) {
+      return ok(directChildElements(periphEl, "registers")[0]);
+    }
+  }
+  return ok(undefined);
 };
 
 const lookupSvdDerivedElement = (
   ref: string,
   currentChildren: readonly Element[],
   rootRegistersEl: Element,
-  periphRegistersByName: ReadonlyMap<string, Element>,
-): Element | null => {
+  peripheralElements: readonly Element[],
+  budget: SvdExpansionBudget,
+): Result<Element | null, string> => {
   if (!ref.includes(".")) {
-    return (
-      findSvdChildByName(currentChildren, ref) ??
-      findSvdChildByName(directChildElements(rootRegistersEl), ref) ??
-      null
+    const localHit = findSvdChildByName(currentChildren, ref, budget);
+    if (!localHit.ok) return localHit;
+    if (localHit.value !== undefined) return ok(localHit.value);
+    const rootHit = findSvdChildByName(
+      directChildElements(rootRegistersEl),
+      ref,
+      budget,
     );
+    if (!rootHit.ok) return rootHit;
+    return ok(rootHit.value ?? null);
   }
   const parts = ref.split(".").filter((part) => part.length > 0);
-  if (parts.length === 0) return null;
+  if (parts.length === 0) return ok(null);
   let container: Element | undefined;
   let startIndex = 0;
-  const localFirst = findSvdChildByName(
+  const localFirstResult = findSvdChildByName(
     directChildElements(rootRegistersEl),
     parts[0]!,
+    budget,
   );
+  if (!localFirstResult.ok) return localFirstResult;
+  const localFirst = localFirstResult.value;
   if (localFirst !== undefined && elementTagLower(localFirst) === "cluster") {
-    if (parts.length === 1) return localFirst;
+    if (parts.length === 1) return ok(localFirst);
     container = localFirst;
     startIndex = 1;
   } else {
-    container = periphRegistersByName.get(parts[0]!);
+    const periphHit = findSvdPeripheralRegistersByName(
+      peripheralElements,
+      parts[0]!,
+      budget,
+    );
+    if (!periphHit.ok) return periphHit;
+    container = periphHit.value;
     startIndex = 1;
   }
-  if (container === undefined || startIndex >= parts.length) return null;
+  if (container === undefined || startIndex >= parts.length) return ok(null);
   let cursorEl: Element | undefined = container;
   for (let idx = startIndex; idx < parts.length; idx += 1) {
-    const match = findSvdChildByName(
+    const matchResult = findSvdChildByName(
       directChildElements(cursorEl),
       parts[idx]!,
+      budget,
     );
-    if (match === undefined) return null;
+    if (!matchResult.ok) return matchResult;
+    const match = matchResult.value;
+    if (match === undefined) return ok(null);
     if (idx < parts.length - 1) {
-      if (elementTagLower(match) !== "cluster") return null;
+      if (elementTagLower(match) !== "cluster") return ok(null);
       cursorEl = match;
     } else {
-      return match;
+      return ok(match);
     }
   }
-  return null;
+  return ok(null);
 };
 
 const mergeClusterChildren = (
@@ -894,7 +951,7 @@ const resolveSvdTreeTemplate = (
   ctx: {
     readonly currentChildren: readonly Element[];
     readonly rootRegistersEl: Element;
-    readonly periphRegistersByName: ReadonlyMap<string, Element>;
+    readonly peripheralElements: readonly Element[];
     readonly descCache: WeakMap<Element, string | null>;
     readonly budget: SvdExpansionBudget;
   },
@@ -939,12 +996,15 @@ const resolveSvdTreeTemplate = (
         `CMSIS-SVD ${tag} '${rawName}' derivedFrom chain exceeds maximum depth ${MAX_SVD_CLUSTER_DEPTH}`,
       );
     }
-    const target = lookupSvdDerivedElement(
+    const targetResult = lookupSvdDerivedElement(
       nextRef,
       ctx.currentChildren,
       ctx.rootRegistersEl,
-      ctx.periphRegistersByName,
+      ctx.peripheralElements,
+      ctx.budget,
     );
+    if (!targetResult.ok) return targetResult;
+    const target = targetResult.value;
     if (target === null || elementTagLower(target) !== tag) {
       return err(
         `CMSIS-SVD ${tag} '${rawName}' references unknown derivedFrom '${nextRef}'`,
@@ -996,7 +1056,7 @@ const parseSvdRegisterTree = (
   ctx: {
     readonly limitations: string[];
     readonly budget: SvdExpansionBudget;
-    readonly periphRegistersByName: ReadonlyMap<string, Element>;
+    readonly peripheralElements: readonly Element[];
     readonly descCache: WeakMap<Element, string | null>;
   },
 ): Result<RawSvdRegister[], string> => {
@@ -1036,7 +1096,7 @@ const parseSvdRegisterTree = (
       const resolvedTemplate = resolveSvdTreeTemplate(itemEl, tag, rawName, {
         currentChildren: work.children,
         rootRegistersEl: registersContainer,
-        periphRegistersByName: ctx.periphRegistersByName,
+        peripheralElements: ctx.peripheralElements,
         descCache: ctx.descCache,
         budget: ctx.budget,
       });
@@ -1380,16 +1440,6 @@ export const parseCmsisSvd = (
   };
   const descCache = new WeakMap<Element, string | null>();
   const peripheralElements = directChildElements(peripheralsEl, "peripheral");
-  const periphRegistersByName = new Map<string, Element>();
-  for (const periphEl of peripheralElements) {
-    const regsEl = directChildElements(periphEl, "registers")[0];
-    if (regsEl === undefined) continue;
-    for (const key of svdElementLookupKeys(periphEl)) {
-      if (!periphRegistersByName.has(key)) {
-        periphRegistersByName.set(key, regsEl);
-      }
-    }
-  }
 
   const limitations: string[] = [];
   const rawList: RawSvdPeripheral[] = [];
@@ -1468,7 +1518,7 @@ export const parseCmsisSvd = (
       const parsedRegs = parseSvdRegisterTree(regsEl, {
         limitations,
         budget,
-        periphRegistersByName,
+        peripheralElements,
         descCache,
       });
       if (!parsedRegs.ok) return parsedRegs;

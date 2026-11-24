@@ -725,4 +725,19 @@ describe("CMSIS-SVD XML comments and iterative traversal", () => {
       "SPARSE_CTRL_STAT",
     );
   });
+
+  it("rejects large peripheral dim template arrays before expanding lookup keys", () => {
+    const periphs = Array.from(
+      { length: 256 },
+      (_, idx) =>
+        `<peripheral><dim>1024</dim><dimIncrement>0x100</dimIncrement><name>P${idx}_%s</name><baseAddress>0x${(0x40000000 + idx * 0x100000).toString(16)}</baseAddress><registers/></peripheral>`,
+    ).join("");
+    const parsed = parseCmsisSvd(
+      `<device><name>KeyBomb</name><peripherals>${periphs}</peripherals></device>`,
+    );
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.error).toContain("exceeds maximum 65536 steps");
+    }
+  });
 });

@@ -5,7 +5,9 @@ use their own format selection; see [GameCube DOL analysis](../ghidra-dol.md).
 
 REA admits a headerless executable when the caller supplies the CPU family and
 the address where file offset 0 should be mapped. That interpretation is not
-inferred from a `.bin` suffix or from unrecognized bytes.
+inferred from a `.bin` suffix or from unrecognized bytes. ARM M-profile images
+can also name their profile and take their entry from the vector table; see
+[ARM M-profile images](#arm-m-profile-images).
 
 ## Open and inspect
 
@@ -29,21 +31,14 @@ rea inspect-native-load-image /absolute/path/to/kernel.img --target-format raw-b
 ```
 
 The example maps a 32-bit ARM-state image at `0x8000`. For `arm`, decoding
-starts at the entry in ARM (A32) state. Thumb-only Cortex-M firmware uses
-`cortex-m` instead. See [Limitations](#limitations).
+starts at the entry in ARM (A32) state, so Thumb-only images, including Cortex-M
+firmware, are not supported. See [Limitations](#limitations).
 
-`architecture` is one of `x86`, `x86_64`, `arm`, `arm64`, `cortex-m`, `6502`, or `m68k`.
-`entry_point` is a hexadecimal address of the form `0x…`. The complete file is
-mapped starting at that address. For `x86`, `x86_64`, `arm`, `arm64`, `6502`, and `m68k`,
-Ghidra seeds an `entry` function there before auto-analysis. For `cortex-m`,
-that address is the vector-table base: the first word is the initial stack
-pointer and the second is the reset vector. REA clears the reset vector's
-Thumb bit, decodes that address as Thumb, names the function
-`reset_handler`, and seeds valid in-image system exceptions plus external
-peripheral interrupt vectors (`irq_<n>_handler` up to slot 255, stopping before
-the earliest observed handler address). ARM, AArch64, and Cortex-M bases must be 4-byte aligned; m68k
-entries must be 2-byte aligned; x86 and 6502 entries may be byte-aligned. A
-Cortex-M image must contain at least eight bytes.
+`architecture` is one of `x86`, `x86_64`, `arm`, `arm64`, `6502`, or `m68k`. `entry_point` is a
+hexadecimal address of the form `0x…`. The complete file is mapped starting at
+that address, and Ghidra seeds an `entry` function there before auto-analysis.
+ARM and AArch64 entries must be 4-byte aligned; m68k entries must be 2-byte
+aligned; x86 and 6502 entries may be byte-aligned.
 For 6502, the entry and complete mapped file must fit within `0x0000..0xffff`;
 images that cross the 16-bit boundary are rejected before provider startup.
 For m68k, the mapping must fit within `0x0..0xffffffff`.
@@ -62,7 +57,6 @@ m68k is big-endian and the others are little-endian.
 | x86_64       | `x86:LE:64:default`   | `gcc`            |
 | arm          | `ARM:LE:32:v7`        | `default`        |
 | arm64        | `AARCH64:LE:64:v8A`   | `default`        |
-| cortex-m     | `ARM:LE:32:Cortex`    | `default`        |
 | 6502         | `6502:LE:16:default`  | `default`        |
 | m68k         | `68000:BE:32:default` | `default`        |
 
@@ -90,49 +84,154 @@ non-overlay in the bound language's default address space. Contradictory mapping
 observations are retained with `mismatch`, even when the source hashes agree.
 
 Hopper and IDA refuse raw-binary targets. Windows Ghidra P0 admits native PE
-applications and DLLs, plus explicitly selected raw 6502 and Cortex-M images.
-Other raw CPU families remain outside the Windows boundary. Raw-binary sessions
-stay read-only. Native path admission, private DACLs, Job Object ownership,
-immutable snapshots, and the no-mutation policy still apply.
+applications/DLLs and explicitly selected raw 6502 images. Other raw CPU families
+remain outside the Windows boundary. Native path admission, private DACLs, Job
+Object ownership, immutable snapshots, and the no-mutation policy still apply.
 
-## Hardware claims
+## ARM M-profile images
 
-A hardware statement uses one rule and one basis. The same rules cover
-controller names, architectural registers, board windows, values computed by
-the image, installed parts, and driver strings.
+Cortex-M flash images start with a vector table and run only Thumb code. A dump
+read from a device, for example with `st-flash read dump.bin 0x08000000 <size>`,
+records neither the address it was read from nor the M profile of the core.
+Name both:
 
-| Rule                    | Settled basis         | Stays unsettled when                                                                                              |
-| ----------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `observed-address`      | `observed_address`    | the address comes from rounding a page the instruction did not access                                             |
-| `chip-manual-name`      | `chip_manual`         | no observed address falls inside a controller window of the active chip map                                       |
-| `architecture-register` | `architecture_manual` | the register address is chosen by the board, such as a GIC, CLINT, or PLIC base                                   |
-| `explicit-profile`      | `explicit_profile`    | the CPU family alone would assign a board memory window or register placement                                     |
-| `instruction-decode`    | `instruction`         | the image's own bit operations do not compute the split                                                           |
-| `installed-part`        | `observed_address`    | the table only lists supported chips, even a single name, until a separate observation identifies the fitted chip |
-| `driver-linkage`        | `observed_address`    | a string's presence is treated as proof that the driver runs during boot                                          |
-| `board-record`          | none                  | the board record itself leaves the statement open, such as a color disagreement                                   |
+```bash
+rea inspect /absolute/path/to/dump.bin --target-format raw-binary --architecture arm --architecture-variant armv7-m --base-address 0x08000000 --provider ghidra --json
+```
 
-Only a settled basis may be stated as fact. A claim keeps the subject, source,
-rule, and reason of the fact it came from. An open color note stays a board
-record. It is not rewritten as an installed-part question. A driver claim keeps
-that driver's id and the evidence that names the captured image.
-`decideHardwareClaim` applies these rules across the built-in SoC catalogs
-(`stm32f1`, `stm32f4`, `stm32l4`, `stm32h7`, `gd32f1`, `gd32f4`, `gd32vf103`,
-`ch32v30x`, `rp2040`, `nrf52`, `samd21`, Xtensa `esp32`/`esp32s2`/`esp32s3`, and
-RISC-V `esp32c2`/`esp32c3`/`esp32c6`/`esp32h2`), container hints (`esp_chip_id`
-and `uf2_family_id`), Cortex-M3/M4 peripheral bit-band and RP2040 atomic
-`XOR`/`SET`/`CLR` register aliases, and caller-supplied CMSIS-SVD (`svd_xml`) or
-Flattened Devicetree (`devicetree`) profiles. A selected board applies its
-memory map and peripheral attachments when its SoC agrees with the active
-platform, and decodes captured-image drivers and boot observations only when the
-subject digest matches `imageSha256`: loaded addresses, pin indexes,
-SFUD rows, a PLL immediate, and vector slots. A bus-name string such as `spi2`
-stays a driver-linkage claim and does not become a controller. Pin role and the
-installed flash part stay unsettled. A PLL field split does not state a clock
-frequency unless the image also shows the clock switch. When that switch is
-present, SYSCLK is the image literal selected by the PLL source, multiplied by
-PLLN, then divided by PLLM and the PLLP divider. The product stays unsettled
-when a divisor is zero or the division leaves a remainder.
+```json
+{
+  "name": "open_binary",
+  "arguments": {
+    "path": "/absolute/path/to/dump.bin",
+    "format": "raw-binary",
+    "architecture": "arm",
+    "architecture_variant": "armv7-m",
+    "base_address": "0x08000000",
+    "provider_id": "ghidra"
+  }
+}
+```
+
+`architecture_variant` names the M profile and selects the Ghidra decoder:
+
+| architecture_variant | Profile            | language_id        | compiler_spec_id |
+| -------------------- | ------------------ | ------------------ | ---------------- |
+| `armv6-m`            | ARMv6-M            | `ARM:LE:32:Cortex` | `default`        |
+| `armv7-m`            | ARMv7-M            | `ARM:LE:32:Cortex` | `default`        |
+| `armv7e-m`           | ARMv7E-M           | `ARM:LE:32:Cortex` | `default`        |
+| `armv8-m.base`       | ARMv8-M Baseline   | `ARM:LE:32:v8-m`   | `default`        |
+| `armv8-m.main`       | ARMv8-M Mainline   | `ARM:LE:32:v8-m`   | `default`        |
+| `armv8.1-m.main`     | ARMv8.1-M Mainline | `ARM:LE:32:v8-m`   | `default`        |
+
+`ARM:LE:32:Cortex` is Ghidra's ARMv7 decoder with Thumb as the default state. It
+has no ARMv8-M encodings, such as the `MSPLIM` and `PSPLIM` system registers that
+v8-M startup code sets, so the v8-M and v8.1-M variants use `ARM:LE:32:v8-m`.
+Ghidra 12.2's `ARM.ldefs` lists `armv8.1-m.main` for that language, which also
+decodes ARMv8.1-M encodings such as MVE and the low-overhead loops (`wls`, `le`);
+the loop branches' flow is wrong, as Limitations describes.
+Neither decoder refuses instructions that a smaller profile lacks: `armv6-m`
+code is decoded with the ARMv7-M instruction set, and `armv8-m.main` code with
+the ARMv8.1-M one.
+
+- `base_address` maps file offset 0 at its own address, and `entry_point` must
+  then lie inside the mapped image. It is required with `architecture_variant`
+  and refused without it, the one lane whose verifier covers a separate base. A
+  dump records neither its load address nor where Reset is, and mapping it at
+  the entry would put a vector table at Reset; a code fragment that starts at
+  its entry passes that address as `base_address`.
+- Without `entry_point`, REA reads the vector table at `vector_table_address`, or
+  at `base_address` when that is omitted. Word 1 is the Reset handler with bit 0
+  set for Thumb state. The vector value is observed, and the entry is derived by
+  clearing bit 0. Word 0, the initial stack pointer, is recorded as observed and
+  is not validated.
+- Use `vector_table_address` when a header precedes the vector table, such as the
+  256-byte boot2 stage of an RP2040 image or an MCUboot header. It applies only
+  when `entry_point` is omitted. The table, whether named or at the base, must be
+  128-byte aligned, as VTOR requires (`TBLOFF` holds address bits 31:7), and it
+  must lie inside the mapped image.
+- REA refuses a Reset word that is even, that points outside the mapped image or
+  into the 8 table bytes it read, or that lies past the end of the file. These
+  are `load_selection_rejected` refusals with the observed words in
+  `details.diagnostics`: a raw dump has no format they can violate, and the usual
+  cause is a wrong `base_address`, `vector_table_address` or variant.
+- An explicit `entry_point` must be even. An odd value is a Thumb interworking
+  address, such as a word copied from the vector table. REA refuses it instead
+  of clearing bit 0; `details.diagnostics` in the error give the even
+  `code_address` and suggest omitting `entry_point`.
+- Each refusal of a load selection is an `invalid_request` with
+  `details.constraint: "load_selection_rejected"` and, when one input is to
+  blame, that input in `details.field`, such as `entry_point` for an odd Thumb
+  entry. The Reset-word refusals name none.
+
+Before auto-analysis, REA's preparation script requires Ghidra's Thumb context
+(`TMode=1`) at the entry and seeds the entry there; `inspect_native_load_image`
+attests that context independently. Ghidra imports the file without its
+processor-defined labels. `ARMCortex.pspec` names the vector table at
+`0x0`-`0x40` and marks every handler slot an entry, reserved slots included, so
+at base `0x0` its names would cover the table and the code after it. The load
+image attests that the seeded entry is the only one.
+
+`npm run verify:ghidra:cortex-m` checks this lane against real Ghidra 12.2
+with source-owned fixtures and LLVM as the decoding oracle; see
+[testing lanes](../testing-lanes.md).
+
+### Identity and Evidence
+
+A load whose base is its caller-selected entry and that names no variant is the
+same load as before these inputs existed, decided on these resolved values. Its
+analysis profile, snapshot target, session reuse and `raw-binary` load image are
+unchanged. Any other raw load:
+
+- reports `base_address`, `architecture_variant` and, when Reset was read from
+  the vector table, `vector_table_address` in `open_binary` and
+  `binary_session`;
+- commits `raw_load` (`version: 1`) to its analysis profile and snapshot target:
+  the base, the variant, the vector table that Reset was read from, and the
+  entry's address, instruction set, `role` and `basis`;
+- returns the `segments` load image (`layout: "segments"`, `version: 1`): one
+  segment backed by the whole file at the base, one entry with its `isa_mode`,
+  `role` and `basis`, and, when the basis is the vector table, `vector_table`
+  with the table address and the two words read from it, as full-width 32-bit
+  words such as `0x080001c5`; the entry holds the canonical code address.
+
+An entry's `role` names its function: `entry` for an entry the caller named,
+`reset` for the Reset handler. Its `basis` records how REA chose it: `caller`
+or `vector-table`. Ghidra names the function it seeds there `entry` whatever
+the role, as its loaders name a program entry; the role, not that name, says
+which handler it is.
+
+Identity has two levels:
+
+- Coordinate identity (`function_coordinate_context`) covers only resolved
+  values that move coordinates: the decoder, the base, and the entry's decode
+  context. Every entry of one image at one base gets the same coordinate
+  context, so functions found from a caller-named entry and from Reset compare.
+  A legacy load maps file offset 0 at its entry, so there the entry address is
+  the base.
+- Session and snapshot identity also cover the provenance that results report:
+  `raw_load` adds the variant, the vector-table address, and the entry's role
+  and basis. The vector words need no place of their own: they are the file
+  bytes at the table address, which the file digest and the base fix. A reused
+  session never reports a basis or vector words that the current request did
+  not produce.
+
+Neither level covers spellings: `0x08000000` and `0x8000000` are the same base,
+an omitted `vector_table_address` equals an explicit one at the base, and REA
+reports canonical addresses only. No result retains the spelling a caller used
+yet. A caller that needs its spelling keeps its own request: an MCP client
+already holds its arguments, and a CLI caller can save its command beside the
+Evidence it writes, together with its `evidence_id`.
+
+These inputs leave a load without them exactly as REA loaded it before: its
+analysis profile inputs, snapshot target and `raw-binary` load image are
+unchanged, so its saved load images stay readable. Snapshots still follow the
+[producer rule](ghidra-provider.md#admitted-function-analysis-semantics): every
+analysis profile commits to the REA release and its packaged bridge scripts, so
+a snapshot that an earlier REA release saved is refused after an upgrade, with
+or without these inputs. Open the target again and save a fresh snapshot. A
+snapshot of a load that uses these inputs also has a different analysis profile,
+so REA versions without these inputs cannot replay it.
 
 ## NMOS 6502
 
@@ -195,14 +294,23 @@ not been exercised.
 
 ## Limitations
 
-- Headers are not discovered from file bytes. The caller still supplies the
-  load address. `cortex-m` reads the vector table at that address; it does not
-  guess a different base. `6502` and `m68k` do not guess a reset vector.
-- Big-endian ARM and Thumb-only variants other than `cortex-m` are unsupported.
-  m68k is the only big-endian family.
-- `cortex-m` seeds in-image vectors whose low bit is set. Memory-mapped I/O
-  and firmware boot sequences are not emulated. `reset_handler` is an assigned
-  analysis name, not a symbol recovered from the image.
+- Headers are not discovered from file bytes. REA does not guess load
+  addresses, profiles, vector-table locations, or memory maps.
+- Big-endian ARM is unsupported, and m68k is the only big-endian family.
+  `architecture_variant` names only the ARM M profiles; no other processor of a
+  family, such as the 65C02 or ColdFire, can be selected.
+- An M-profile load maps one segment: the file at its base. SRAM, peripheral and
+  system blocks are not created, and only the Reset vector is read. Ghidra's
+  processor-defined vector labels are not applied, so other vectors are neither
+  entries nor labels. Floating-point state, TrustZone and device memory maps are
+  not modelled.
+- Ghidra 12.2, like 12.1.4, decodes the ARMv8.1-M low-overhead-loop branches
+  `wls` and `le` with the right mnemonics, but not their flow. In the verifier's Cortex-M55
+  image, `wls` branched 2 bytes short of its target, `le` branched 4 bytes past
+  the loop start, and `le` had no fall-through. Code after such a loop may be
+  left undisassembled; `armv8.1-m.main` results say so.
+- Reset vectors, memory-mapped I/O, and firmware boot sequences are not
+  emulated.
 - Independent load-image verification covers source identity, mapped file
   bytes, the bound language, and the caller-supplied entry. Original bytes
   stay unchanged.

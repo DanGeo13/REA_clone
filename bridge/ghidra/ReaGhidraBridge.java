@@ -218,6 +218,10 @@ public final class ReaGhidraBridge extends HeadlessScript {
     // DecompileProcess converts MiB to bytes using a signed-int left shift.
     private static final int MAX_DECOMPILE_PAYLOAD_MIB = Integer.MAX_VALUE >> 20;
     private ValueFlowLimits valueFlowLimits = defaultValueFlowLimits();
+    // Context registers whose entry values TypeScript committed for this import, such as TMode.
+    private List<String> entryContextRegisters = List.of();
+    // The registers GHIDRA_RAW_ENTRY_CONTEXT can commit; the launcher tests keep them equal.
+    private static final Set<String> ENTRY_CONTEXT_REGISTERS = Set.of("TMode");
     // DecompileProcess converts seconds to an int millisecond timer delay.
     private static final int MAX_DECOMPILE_TIMEOUT_SECONDS = Integer.MAX_VALUE / 1000;
     private final ReaGhidraExtensions analysisExtensions = new ReaGhidraExtensions();
@@ -236,6 +240,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
         SessionDescriptor descriptor = readDescriptor(descriptorPath);
         existingProject = descriptor.existingProject;
         decompileTimeoutSeconds = descriptor.decompileTimeoutSeconds();
+        entryContextRegisters = descriptor.entryContextRegisters();
         // Windows retains a native immutable bearer descriptor lease until
         // runtime_close; POSIX removes it after this read. Normal cleanup removes
         // the Windows file, while abrupt owner death can leave private residue.
@@ -655,6 +660,11 @@ public final class ReaGhidraBridge extends HeadlessScript {
         String riscvCallingConvention = currentProgram.getOptions(ghidra.program.model.listing.Program.PROGRAM_INFO)
             .getString("REA RISC-V calling convention", null);
         if (riscvCallingConvention != null) result.add("riscv_calling_convention", JsonParser.parseString(riscvCallingConvention));
+        // Written by ReaGhidraPrepareElfLoad before auto-analysis; REA requires it
+        // exactly when the committed profile declares a RISC-V load preparation.
+        String loadPreparation = currentProgram.getOptions(ghidra.program.model.listing.Program.PROGRAM_INFO)
+            .getString("REA ELF load preparation", null);
+        if (loadPreparation != null) result.add("elf_load_preparation", JsonParser.parseString(loadPreparation));
         return result;
     }
 
@@ -827,7 +837,9 @@ public final class ReaGhidraBridge extends HeadlessScript {
             JsonObject context = new JsonObject();
             context.addProperty("address", canonicalAddress(entry));
             JsonArray registers = new JsonArray();
-            for (String name : new String[] { "CS", "DS", "ES", "SS" }) {
+            List<String> names = new ArrayList<>(List.of("CS", "DS", "ES", "SS"));
+            for (String name : entryContextRegisters) if (!names.contains(name)) names.add(name);
+            for (String name : names) {
                 Register register = currentProgram.getRegister(name);
                 if (register == null) continue;
                 JsonObject row = new JsonObject();
@@ -1594,13 +1606,6 @@ public final class ReaGhidraBridge extends HeadlessScript {
         return item;
     }
 
-    /** MIPS uses ISA_MODE. ARM, including Cortex-M, uses TMode. Other languages have no mode register here. */
-    static String processorContextRegister(String languageId) {
-        if (languageId.startsWith("MIPS:")) return "ISA_MODE";
-        if (languageId.startsWith("ARM:")) return "TMode";
-        return null;
-    }
-
     private JsonObject inspectNativeInstruction(JsonObject params, boolean includeIncoming) throws Exception {
         requireKeys(params, Set.of("document", "address"));
         requireDocument(params);
@@ -1612,11 +1617,11 @@ public final class ReaGhidraBridge extends HeadlessScript {
         result.add("procedure", function == null ? JsonNull.INSTANCE : GSON.toJsonTree(canonicalAddress(function.getEntryPoint())));
         result.addProperty("architecture", currentProgram.getLanguageID().getIdAsString());
         result.addProperty("mode", currentProgram.getLanguage().getLanguageDescription().getVariant());
-        String processorRegister = processorContextRegister(
-            currentProgram.getLanguageID().getIdAsString());
-        if (processorRegister != null) {
+        if (currentProgram.getLanguageID().getIdAsString().startsWith("MIPS:") ||
+            currentProgram.getLanguageID().getIdAsString().startsWith("ARM:")) {
             JsonArray decoderContext = new JsonArray();
-            var modeRegister = currentProgram.getRegister(processorRegister);
+            String regName = currentProgram.getLanguageID().getIdAsString().startsWith("MIPS:") ? "ISA_MODE" : "TMode";
+            var modeRegister = currentProgram.getRegister(regName);
             if (modeRegister != null) {
                 var modeValue = currentProgram.getProgramContext().getValue(modeRegister, address, false);
                 JsonObject context = new JsonObject();
@@ -6298,7 +6303,16 @@ public final class ReaGhidraBridge extends HeadlessScript {
             keys.add("decompile_timeout_seconds");
         if (parsed.isJsonObject() && parsed.getAsJsonObject().has("existing_project"))
             keys.add("existing_project");
+        if (parsed.isJsonObject() && parsed.getAsJsonObject().has("entry_context_register"))
+            keys.add("entry_context_register");
         JsonObject object = requireObject(parsed, keys);
+        List<String> entryContext = List.of();
+        if (object.has("entry_context_register")) {
+            String register = requireString(object, "entry_context_register");
+            if (!ENTRY_CONTEXT_REGISTERS.contains(register))
+                throw new IllegalArgumentException("REA session descriptor is invalid");
+            entryContext = List.of(register);
+        }
         int decompileTimeout = 0;
         if (object.has("decompile_timeout_seconds")) {
             decompileTimeout = requireInteger(object, "decompile_timeout_seconds");
@@ -6315,7 +6329,8 @@ public final class ReaGhidraBridge extends HeadlessScript {
             requireString(object, "profile_digest"),
             object.has("analysis_extensions") ? object.getAsJsonArray("analysis_extensions") : new JsonArray(),
             decompileTimeout,
-            object.has("existing_project") && requireBoolean(object, "existing_project")
+            object.has("existing_project") && requireBoolean(object, "existing_project"),
+            entryContext
         );
     }
 
@@ -6849,7 +6864,8 @@ public final class ReaGhidraBridge extends HeadlessScript {
         String profileDigest,
         JsonArray analysisExtensions,
         int decompileTimeoutSeconds,
-        boolean existingProject
+        boolean existingProject,
+        List<String> entryContextRegisters
     ) {}
     private static ValueFlowLimits defaultValueFlowLimits() {
         return new ValueFlowLimits(DEFAULT_HIGH_PCODE_OPS, DEFAULT_HIGH_PCODE_INPUTS_PER_OP, DEFAULT_HIGH_PCODE_DEF_USE_EDGES);

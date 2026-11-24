@@ -206,6 +206,16 @@ const enrichBlock = (
   let blockBasis: ControllerNameBasis = controllerNameBasis(false);
 
   for (const addr of block.uniqueAddresses) {
+    const socDef =
+      ctx.activePlatform !== null
+        ? (lookupSocPeripheral(addr, ctx.activePlatform) ??
+          resolveSocRegisterAlias(addr, ctx.activePlatform)?.peripheral ??
+          null)
+        : null;
+    if (socDef !== null) {
+      matchedSocNames.add(socDef.name);
+    }
+
     const customHit =
       ctx.customProfile !== null
         ? lookupCustomPeripheral(BigInt(addr), ctx.customProfile)
@@ -228,17 +238,10 @@ const enrichBlock = (
       );
       continue;
     }
-    if (ctx.activePlatform !== null) {
-      const def =
-        lookupSocPeripheral(addr, ctx.activePlatform) ??
-        resolveSocRegisterAlias(addr, ctx.activePlatform)?.peripheral ??
-        null;
-      if (def !== null) {
-        matchedNames.add(def.name);
-        matchedSocNames.add(def.name);
-        primaryBus = def.bus;
-        if (blockBasis === "observed_address") blockBasis = "chip_manual";
-      }
+    if (socDef !== null) {
+      matchedNames.add(socDef.name);
+      primaryBus = socDef.bus;
+      if (blockBasis === "observed_address") blockBasis = "chip_manual";
     }
   }
 

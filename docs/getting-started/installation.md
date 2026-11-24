@@ -1275,9 +1275,9 @@ require Hopper; Windows P0 remains read-only.
 
 Windows P0 admits native x86, x86-64, ARMNT (Thumb-2) and ARM64 PE applications and DLLs,
 [DOS MZ executables](../providers/ghidra-dos.md), plus explicitly
-selected [raw NMOS 6502 images](../providers/raw-binary.md#nmos-6502) and Cortex-M flash images with a caller-supplied
+selected [raw NMOS 6502 images](../providers/raw-binary.md#nmos-6502) with a caller-supplied
 entry at file offset 0, on fixed local NTFS/ReFS volumes. Other raw CPU families remain
-unsupported on Windows. Raw-binary sessions stay read-only.
+unsupported on Windows.
 The npm package bundles native Job Object ownership, protected private runtime
 DACLs, and handle-based path admission; no separate addon installation is needed.
 See the [Windows Ghidra P0 guide](../providers/windows-ghidra-p0.md) for verified scope and
@@ -1475,7 +1475,10 @@ that dominate the time and the Program reuse choices below; in existing-project
 mode it omits that import and analyzer advice.
 REA parses the supplied configuration environment and
 passes the deadline to each provider client; a startup failure is returned by the query that triggered it,
-without exposing partial analysis. This deadline is separate from MCP transport
+without exposing partial analysis. After a startup runs out its deadline, later
+queries in the same session return that failure immediately instead of importing
+again, until the effective deadline changes or `close_binary` and `open_binary`
+start a new session. This deadline is separate from MCP transport
 initialization and the client's deadline for that individual tool call. A client
 can time out earlier even when Ghidra would complete within its startup deadline.
 See [Ghidra first-query deadlines and recovery](../reference/mcp-contracts.md#ghidra-first-query-deadlines-and-recovery)

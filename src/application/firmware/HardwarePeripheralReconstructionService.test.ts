@@ -1134,7 +1134,7 @@ describe("dynamic SVD/Devicetree profiles and container hints", () => {
         sha256: "d".repeat(64),
         path: "/tmp/vendor.bin",
         format: "raw-binary",
-        architecture: "cortex-m",
+        architecture: "arm",
       },
       limitations: [],
     };
@@ -1546,7 +1546,7 @@ describe("overlapping custom profile MMIO windows", () => {
         sha256: "e".repeat(64),
         path: "/tmp/mixed.bin",
         format: "raw-binary",
-        architecture: "cortex-m",
+        architecture: "arm",
       },
       limitations: [],
     };
@@ -1767,5 +1767,51 @@ describe("overlapping custom profile MMIO windows", () => {
     expect(svdRes.value.nonMmioAccessCount).toBe(1);
     expect(svdRes.value.peripheralBlocks).toHaveLength(1);
     expect(svdRes.value.peripheralBlocks[0]?.socPeripheralName).toBe("UART0");
+
+    // Combining a known board with a matching vendor SVD preserves boardDevices and boardDrivers
+    const rtSparkSvdExec: AnalysisExecution = {
+      ...execution,
+      result: {
+        procedure: ghidraFunctionIdentity(),
+        direction: "outgoing",
+        reference_kinds_available: true,
+        references: [
+          { ...ghidraReferenceEdge(), target_address: "0x40011004" },
+        ],
+        unresolved_calls: [],
+      },
+      subject: {
+        sha256: RT_SPARK_FLASH_IMAGE_SHA256,
+        path: "/tmp/rt-spark.bin",
+        format: "raw-binary",
+        architecture: "arm",
+      },
+    };
+    const boardWithSvd = await reconstructProcedureHardwareInteractions(
+      { execute: () => Promise.resolve(ok(rtSparkSvdExec)) },
+      {
+        procedure: "usart1_putc",
+        architecture: "cortex-m",
+        board: "stm32f407-rt-spark",
+        svd_xml: `<device><name>STM32F407</name><peripherals>
+          <peripheral>
+            <name>USART1</name>
+            <baseAddress>0x40011000</baseAddress>
+            <addressBlock><offset>0x0</offset><size>0x400</size></addressBlock>
+            <registers>
+              <register><name>DR</name><addressOffset>0x04</addressOffset></register>
+            </registers>
+          </peripheral>
+        </peripherals></device>`,
+      },
+    );
+    if (!boardWithSvd.ok) throw boardWithSvd.error;
+    expect(boardWithSvd.value.peripheralBlocks[0]).toMatchObject({
+      socPeripheralName: "USART1",
+      socPeripheralNameBasis: "explicit_profile",
+      knownRegisters: ["USART1_DR"],
+      boardDevices: [expect.objectContaining({ id: "usb-uart-com1" })],
+      boardDrivers: [expect.objectContaining({ id: "serial-usart1" })],
+    });
   });
 });
