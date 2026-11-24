@@ -254,6 +254,7 @@ export interface ArtifactReader {
     | "ktx2"
     | "uimage"
     | "android-boot-image"
+    | "android-dtbo"
     | "android-ota-payload"
     | "iso9660"
     | "uefi"
