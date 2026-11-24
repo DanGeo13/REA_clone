@@ -140,7 +140,7 @@ type AsarExtentRefusal = keyof typeof ASAR_EXTENT_REFUSALS;
  * the ASAR header schema belong to the decoder at the interpretation boundary.
  * Refusals are plain tags: the signature probe refuses most streams it sees.
  */
-const parseAsarHeaderExtents = (
+export const parseAsarHeaderExtents = (
   prefix: Uint8Array,
   archiveBytes?: number,
 ): Result<Omit<AsarHeaderExtents, "archiveBytes">, AsarExtentRefusal> => {
@@ -440,6 +440,16 @@ export const readAsarHeader = async (
   assertArtifactReadActive(signal);
   if (bytes.length !== extents.jsonBytes)
     throw new ArtifactReaderFailure("format", "Truncated ASAR JSON header");
+  return parseAsarHeaderJson(bytes);
+};
+
+/**
+ * Decode admitted ASAR header JSON bytes as strict UTF-8 and parse them,
+ * rejecting duplicate member names. A consumer that already holds the admitted
+ * header bytes interprets them through this one function, so none decodes or
+ * accepts them differently from {@link readAsarHeader}.
+ */
+export const parseAsarHeaderJson = (bytes: Uint8Array): unknown => {
   let json: string;
   try {
     json = strictUtf8Decoder("preserve").decode(bytes);
