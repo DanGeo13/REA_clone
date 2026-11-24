@@ -456,6 +456,8 @@ export type CallerAbortKind =
   | "interrupt"
   /** The CLI or direct-analysis process received SIGTERM. */
   | "terminate"
+  /** The CLI or direct-analysis process received SIGBREAK (Windows Ctrl+Break). */
+  | "break"
   /** The MCP client sent `notifications/cancelled` for the request. */
   | "request-cancelled"
   /** The MCP or HTTP client left before its request settled. */
@@ -464,6 +466,7 @@ export type CallerAbortKind =
 const CALLER_ABORT_MESSAGES: Readonly<Record<CallerAbortKind, string>> = {
   interrupt: "The caller interrupted this operation (SIGINT)",
   terminate: "The caller terminated this operation (SIGTERM)",
+  break: "The caller interrupted this operation (SIGBREAK)",
   "request-cancelled": "The MCP client cancelled this request",
   "client-disconnected": "The client disconnected before this request settled",
 };
@@ -485,8 +488,16 @@ export class CallerAbort extends DOMException {
   }
 
   /** The reason for a process signal delivered to a one-shot command. */
-  static forProcessSignal(signal: "SIGINT" | "SIGTERM"): CallerAbort {
-    return new CallerAbort(signal === "SIGINT" ? "interrupt" : "terminate");
+  static forProcessSignal(
+    signal: "SIGINT" | "SIGTERM" | "SIGBREAK",
+  ): CallerAbort {
+    return new CallerAbort(
+      signal === "SIGINT"
+        ? "interrupt"
+        : signal === "SIGTERM"
+          ? "terminate"
+          : "break",
+    );
   }
 }
 
