@@ -247,6 +247,7 @@ export interface ArtifactReader {
     | "godot-pck"
     | "unityfs"
     | "wxapkg"
+    | "android-backup"
     | "tar"
     | "dds"
     | "glb"
