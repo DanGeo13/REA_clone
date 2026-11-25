@@ -263,3 +263,39 @@ it("ranks name matches ahead of description-only matches and caches projected in
   );
   expect(repeatPage.loaded_count).toBe(5);
 });
+
+it("ranks multi-keyword queries by relevance instead of requiring every word to match (#11707)", async () => {
+  const f = await connect();
+  // "alpha_sqlite" matches both "alpha" and "sqlite" (2 words)
+  // "beta_sqlite" matches "sqlite" in name (1 word, 1 name match)
+  // "binary_session" matches "sqlite" in description (1 word, 0 name matches)
+  // "nonexistent_attribute" matches 0 words
+  const result = await f.discover({
+    query: "alpha sqlite nonexistent_attribute",
+    limit: 10,
+  });
+  expect(result.structuredContent).toMatchObject({
+    total_matches: 3,
+    tools: [
+      { name: "alpha_sqlite" },
+      { name: "beta_sqlite" },
+      { name: "binary_session" },
+    ],
+  });
+
+  // Total matches takes priority over name matches and alphabetical order:
+  // "binary_session" matches both "sqlite" (in description) and "session" (in name) -> 2 search matches
+  // "alpha_sqlite" and "beta_sqlite" only match "sqlite" -> 1 search match
+  const ranked = await f.discover({
+    query: "sqlite session",
+    limit: 10,
+  });
+  expect(ranked.structuredContent).toMatchObject({
+    total_matches: 3,
+    tools: [
+      { name: "binary_session" },
+      { name: "alpha_sqlite" },
+      { name: "beta_sqlite" },
+    ],
+  });
+});

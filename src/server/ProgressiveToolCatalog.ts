@@ -28,6 +28,28 @@ const catalogListing = (registered: RegisteredTool): CatalogListing => {
   };
 };
 
+const rankCatalogMatches = (
+  tools: ReadonlyMap<string, { search: string }>,
+  words: readonly string[],
+): readonly string[] => {
+  if (words.length === 0)
+    return [...tools.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return [...tools]
+    .filter(([, tool]) => words.some((word) => tool.search.includes(word)))
+    .map(([name, tool]) => ({
+      name,
+      searchMatches: words.filter((word) => tool.search.includes(word)).length,
+      nameMatches: words.filter((word) => name.includes(word)).length,
+    }))
+    .sort(
+      (left, right) =>
+        right.searchMatches - left.searchMatches ||
+        right.nameMatches - left.nameMatches ||
+        (left.name < right.name ? -1 : left.name > right.name ? 1 : 0),
+    )
+    .map(({ name }) => name);
+};
+
 /** Per-connection visibility; canonical SDK handles retain validation and authority. */
 export class ProgressiveToolCatalog {
   readonly identity: CatalogIdentity;
@@ -95,28 +117,7 @@ export class ProgressiveToolCatalog {
 
   private rankMatches(query: string | undefined): readonly string[] {
     const words = (query ?? "").toLowerCase().split(/\s+/u).filter(Boolean);
-    const ranked: { readonly name: string; readonly score: number }[] = [];
-    for (const [name, tool] of this.tools) {
-      let matchesAll = true;
-      for (let i = 0; i < words.length; i++) {
-        if (!tool.search.includes(words[i]!)) {
-          matchesAll = false;
-          break;
-        }
-      }
-      if (!matchesAll) continue;
-      let score = 0;
-      for (let i = 0; i < words.length; i++) {
-        if (name.includes(words[i]!)) score += 1;
-      }
-      ranked.push({ name, score });
-    }
-    ranked.sort(
-      (left, right) =>
-        right.score - left.score ||
-        (left.name < right.name ? -1 : left.name > right.name ? 1 : 0),
-    );
-    return ranked.map((entry) => entry.name);
+    return rankCatalogMatches(this.tools, words);
   }
 
   discover(input: z.infer<typeof DISCOVER_TOOLS.inputSchema>) {
