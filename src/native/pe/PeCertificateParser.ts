@@ -26,6 +26,12 @@ import {
   type PeImage,
 } from "../../domain/native/peImage.js";
 import { peImageBaseHex } from "../../domain/native/peAddressSpace.js";
+import {
+  admitPeSecurityDirectory,
+  PE_SECURITY_DIRECTORY_DEFECTS,
+  WIN_CERTIFICATE_ALIGNMENT,
+  WIN_CERTIFICATE_HEADER_BYTES,
+} from "../../domain/pe/peSecurityDirectory.js";
 import { sha256Hex } from "../../kernel/sha256Hex.js";
 
 /** The format the certificate table's own parser names in its failures. */
@@ -60,24 +66,8 @@ const readCertificateImageAt = async (
   }
 };
 
-const requireRange = (
-  fileSize: number,
-  offset: number,
-  length: number,
-): void => {
-  if (
-    !Number.isSafeInteger(offset) ||
-    !Number.isSafeInteger(length) ||
-    offset < 0 ||
-    length < 0 ||
-    offset > fileSize - length
-  )
-    failTruncated(
-      `PE certificate range ${String(offset)} + ${String(length)} leaves the artifact.`,
-    );
-};
-
-const align8 = (value: number): number => Math.ceil(value / 8) * 8;
+const align8 = (value: number): number =>
+  Math.ceil(value / WIN_CERTIFICATE_ALIGNMENT) * WIN_CERTIFICATE_ALIGNMENT;
 
 const LIMITATIONS = [
   "This workflow does not verify signatures, certificate chains, timestamps, or Authenticode digest coverage of image bytes.",
@@ -97,17 +87,22 @@ const ABSENT_LIMITATIONS = [
 
 const certificateTableRange = (image: PeImage, fileSize: number) => {
   const security = image.pe_data_directories[4];
-  if (security === undefined || (security.address === 0 && security.size === 0))
-    return null;
-  const { address: tableOffset, size: tableSize } = security;
-  if (tableSize === 0 || tableOffset < image.pe_size_of_headers)
-    fail("PE certificate table offset overlaps headers or has zero size.");
-  if (tableOffset % 8 !== 0)
-    fail("PE certificate table offset must be aligned to eight bytes.");
-  requireRange(fileSize, tableOffset, tableSize);
+  const admitted = admitPeSecurityDirectory(
+    security,
+    image.pe_size_of_headers,
+    fileSize,
+  );
+  if (admitted.status === "absent" || security === undefined) return null;
+  // A size that is short or off the eight-byte grid is left to the entry
+  // walk, which names the truncated header or alignment padding it finds.
+  if (admitted.status === "malformed" && admitted.defect !== "invalid-size") {
+    const message = `${PE_SECURITY_DIRECTORY_DEFECTS[admitted.defect]} Declared range: offset ${String(admitted.offset)}, size ${String(admitted.size)}.`;
+    if (admitted.defect === "outside-artifact") failTruncated(message);
+    fail(message);
+  }
   return {
-    tableOffset,
-    tableSize,
+    tableOffset: admitted.offset,
+    tableSize: admitted.size,
     directoryAt: image.pe_optional_header_file_offset + security.offset,
   };
 };
@@ -155,7 +150,7 @@ const parsePeCertificateTable = (
     if (table.length - at < 8)
       failTruncated("WIN_CERTIFICATE header is truncated.");
     const length = reader.u32(at);
-    if (length < 8)
+    if (length < WIN_CERTIFICATE_HEADER_BYTES)
       fail("WIN_CERTIFICATE dwLength is shorter than its header.");
     const entryEnd = at + length;
     if (entryEnd > table.length)
@@ -172,7 +167,10 @@ const parsePeCertificateTable = (
       );
     const revision = reader.u16(at + 4);
     const certificateType = reader.u16(at + 6);
-    const entryPayload = table.subarray(at + 8, entryEnd);
+    const entryPayload = table.subarray(
+      at + WIN_CERTIFICATE_HEADER_BYTES,
+      entryEnd,
+    );
     let payload = entryPayload;
     let pkcs7: PeCertificates["entries"][number]["pkcs7"] = null;
     if (peCertificateTypeName(certificateType) === "pkcs7") {
@@ -183,10 +181,11 @@ const parsePeCertificateTable = (
         // trailing data.
         const root = readAsn1(entryPayload);
         const paddingBytes = entryPayload.length - root.end;
-        const alignedLength = align8(8 + root.end);
+        const alignedLength = align8(WIN_CERTIFICATE_HEADER_BYTES + root.end);
         if (
           paddingBytes !== 0 &&
-          (8 + entryPayload.length !== alignedLength ||
+          (WIN_CERTIFICATE_HEADER_BYTES + entryPayload.length !==
+            alignedLength ||
             !entryPayload.subarray(root.end).every((byte) => byte === 0))
         )
           fail("WIN_CERTIFICATE has invalid PKCS#7 alignment padding.");
@@ -203,7 +202,11 @@ const parsePeCertificateTable = (
           digest_algorithm_oids: [...parsed.digest_algorithm_oids],
           certificates: parsed.certificates.map((certificate) => ({
             location: {
-              offset: tableOffset + at + 8 + certificate.start,
+              offset:
+                tableOffset +
+                at +
+                WIN_CERTIFICATE_HEADER_BYTES +
+                certificate.start,
               bytes: certificate.end - certificate.start,
             },
             der_sha256: sha256Hex(
@@ -273,7 +276,10 @@ const parsePeCertificateTable = (
       certificate_type: certificateType,
       certificate_type_name: peCertificateTypeName(certificateType),
       payload: {
-        location: { offset: tableOffset + at + 8, bytes: payload.length },
+        location: {
+          offset: tableOffset + at + WIN_CERTIFICATE_HEADER_BYTES,
+          bytes: payload.length,
+        },
         bytes: payload.length,
         sha256: sha256Hex(payload),
       },
