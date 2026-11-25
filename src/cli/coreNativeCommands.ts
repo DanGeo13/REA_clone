@@ -354,11 +354,11 @@ const registerProcedureSelectorCommands = (
         esp_chip_id: {
           name: "esp-chip-id",
           description:
-            "Optional ESP image header chip_id from inspect_firmware_image",
+            "Optional ESP image header chip_id from inspect-artifact",
         },
         uf2_family_id: {
           name: "uf2-family-id",
-          description: "Optional UF2 family_id from inspect_firmware_image",
+          description: "Optional UF2 region family_id from inspect-artifact",
         },
       },
     },
