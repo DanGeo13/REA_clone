@@ -740,4 +740,71 @@ describe("CMSIS-SVD XML comments and iterative traversal", () => {
       expect(parsed.error).toContain("exceeds maximum 65536 steps");
     }
   });
+
+  it("charges substituted dimIndex placeholder lengths before formatting register, peripheral, or lookup names", () => {
+    const bigToken = "A".repeat(64 * 1024);
+    const manyPlaceholders = `R_${"%s".repeat(512)}`;
+
+    const regBomb = parseCmsisSvd(
+      `<device><name>DimNameBomb</name><peripherals>
+        <peripheral>
+          <name>P0</name>
+          <baseAddress>0x40000000</baseAddress>
+          <registers>
+            <register>
+              <dim>2</dim>
+              <dimIncrement>0x4</dimIncrement>
+              <dimIndex>${bigToken},1</dimIndex>
+              <name>${manyPlaceholders}</name>
+              <addressOffset>0x0</addressOffset>
+            </register>
+          </registers>
+        </peripheral>
+      </peripherals></device>`,
+    );
+    expect(regBomb).toEqual({
+      ok: false,
+      error: "CMSIS-SVD expanded text exceeds maximum 16 MiB character budget",
+    });
+
+    const lookupBomb = parseCmsisSvd(
+      `<device><name>LookupNameBomb</name><peripherals>
+        <peripheral>
+          <name>P0</name>
+          <baseAddress>0x40000000</baseAddress>
+          <registers>
+            <register derivedFrom="R_TARGET"><name>CHILD</name><addressOffset>0x0</addressOffset></register>
+            <register>
+              <dim>2</dim>
+              <dimIncrement>0x4</dimIncrement>
+              <dimIndex>${bigToken},1</dimIndex>
+              <name>${manyPlaceholders}</name>
+              <addressOffset>0x10</addressOffset>
+            </register>
+          </registers>
+        </peripheral>
+      </peripherals></device>`,
+    );
+    expect(lookupBomb).toEqual({
+      ok: false,
+      error: "CMSIS-SVD expanded text exceeds maximum 16 MiB character budget",
+    });
+
+    const periphBomb = parseCmsisSvd(
+      `<device><name>PeriphNameBomb</name><peripherals>
+        <peripheral>
+          <dim>2</dim>
+          <dimIncrement>0x1000</dimIncrement>
+          <dimIndex>${bigToken},1</dimIndex>
+          <name>${manyPlaceholders}</name>
+          <baseAddress>0x40000000</baseAddress>
+          <registers/>
+        </peripheral>
+      </peripherals></device>`,
+    );
+    expect(periphBomb).toEqual({
+      ok: false,
+      error: "CMSIS-SVD expanded text exceeds maximum 16 MiB character budget",
+    });
+  });
 });

@@ -725,8 +725,10 @@ const expandDimIndices = (
 ): string[] => {
   if (dimIndexRaw !== null && dimIndexRaw.length > 0) {
     if (dimIndexRaw.includes(",")) {
-      const parts = dimIndexRaw.split(",").map((part) => part.trim());
-      if (parts.length === dim) return parts;
+      const rawParts = dimIndexRaw.split(",", dim + 1);
+      if (rawParts.length === dim) {
+        return rawParts.map((part) => part.trim());
+      }
     }
     const rangeMatch = /^(\d+)-(\d+)$/u.exec(dimIndexRaw.trim());
     if (rangeMatch?.[1] && rangeMatch[2]) {
@@ -748,6 +750,44 @@ const expandDimIndices = (
     }
   }
   return Array.from({ length: dim }, (_, idx) => String(idx));
+};
+
+const countDimPlaceholders = (template: string): number => {
+  let count = 0;
+  let cursor = 0;
+  while (true) {
+    const found = template.indexOf("%s", cursor);
+    if (found < 0) return count;
+    count += 1;
+    cursor = found + 2;
+  }
+};
+
+const projectedDimNameLength = (
+  template: string,
+  placeholderCount: number,
+  indexToken: string,
+): number =>
+  placeholderCount > 0
+    ? template.length + placeholderCount * (indexToken.length - 2)
+    : template.length + indexToken.length;
+
+const resolveSvdDimTokens = (
+  element: Element,
+  dim: number,
+  budget: SvdExpansionBudget,
+  cache: WeakMap<Element, readonly string[]>,
+): Result<readonly string[], string> => {
+  const cached = cache.get(element);
+  if (cached !== undefined) return ok(cached);
+  const dimIndexRaw = directChildText(element, "dimindex");
+  if (dimIndexRaw !== null && dimIndexRaw.length > 0) {
+    const rawCharge = chargeSvdTextBudget(budget, dimIndexRaw.length);
+    if (!rawCharge.ok) return rawCharge;
+  }
+  const tokens = expandDimIndices(dim, dimIndexRaw);
+  cache.set(element, tokens);
+  return ok(tokens);
 };
 
 const formatDimName = (template: string, indexToken: string): string =>
@@ -780,6 +820,7 @@ const svdElementMatchesName = (
   element: Element,
   targetName: string,
   budget: SvdExpansionBudget,
+  dimTokenCache: WeakMap<Element, readonly string[]>,
 ): Result<boolean, string> => {
   budget.remainingSteps -= 1;
   if (budget.remainingSteps < 0) {
@@ -811,9 +852,26 @@ const svdElementMatchesName = (
       `CMSIS-SVD expanded peripheral/register count exceeds maximum ${MAX_SVD_EXPANSION_STEPS} steps`,
     );
   }
-  const tokens = expandDimIndices(count, directChildText(element, "dimindex"));
+  const tokensResult = resolveSvdDimTokens(
+    element,
+    count,
+    budget,
+    dimTokenCache,
+  );
+  if (!tokensResult.ok) return tokensResult;
+  const tokens = tokensResult.value;
+  const placeholderCount = countDimPlaceholders(rawName);
   for (let idx = 0; idx < count; idx += 1) {
-    if (formatDimName(rawName, tokens[idx] ?? String(idx)) === targetName) {
+    const token = tokens[idx] ?? String(idx);
+    const expandedLen = projectedDimNameLength(
+      rawName,
+      placeholderCount,
+      token,
+    );
+    const lenCharge = chargeSvdTextBudget(budget, expandedLen);
+    if (!lenCharge.ok) return lenCharge;
+    if (expandedLen !== targetName.length) continue;
+    if (formatDimName(rawName, token) === targetName) {
       return ok(true);
     }
   }
@@ -824,11 +882,17 @@ const findSvdChildByName = (
   children: readonly Element[],
   targetName: string,
   budget: SvdExpansionBudget,
+  dimTokenCache: WeakMap<Element, readonly string[]>,
 ): Result<Element | undefined, string> => {
   for (const child of children) {
     const tag = elementTagLower(child);
     if (tag !== "register" && tag !== "cluster") continue;
-    const matched = svdElementMatchesName(child, targetName, budget);
+    const matched = svdElementMatchesName(
+      child,
+      targetName,
+      budget,
+      dimTokenCache,
+    );
     if (!matched.ok) return matched;
     if (matched.value) return ok(child);
   }
@@ -839,9 +903,15 @@ const findSvdPeripheralRegistersByName = (
   peripheralElements: readonly Element[],
   targetName: string,
   budget: SvdExpansionBudget,
+  dimTokenCache: WeakMap<Element, readonly string[]>,
 ): Result<Element | undefined, string> => {
   for (const periphEl of peripheralElements) {
-    const matched = svdElementMatchesName(periphEl, targetName, budget);
+    const matched = svdElementMatchesName(
+      periphEl,
+      targetName,
+      budget,
+      dimTokenCache,
+    );
     if (!matched.ok) return matched;
     if (matched.value) {
       return ok(directChildElements(periphEl, "registers")[0]);
@@ -852,19 +922,28 @@ const findSvdPeripheralRegistersByName = (
 
 const lookupSvdDerivedElement = (
   ref: string,
-  currentChildren: readonly Element[],
-  rootRegistersEl: Element,
-  peripheralElements: readonly Element[],
-  budget: SvdExpansionBudget,
+  ctx: {
+    readonly currentChildren: readonly Element[];
+    readonly rootRegistersEl: Element;
+    readonly peripheralElements: readonly Element[];
+    readonly budget: SvdExpansionBudget;
+    readonly dimTokenCache: WeakMap<Element, readonly string[]>;
+  },
 ): Result<Element | null, string> => {
   if (!ref.includes(".")) {
-    const localHit = findSvdChildByName(currentChildren, ref, budget);
+    const localHit = findSvdChildByName(
+      ctx.currentChildren,
+      ref,
+      ctx.budget,
+      ctx.dimTokenCache,
+    );
     if (!localHit.ok) return localHit;
     if (localHit.value !== undefined) return ok(localHit.value);
     const rootHit = findSvdChildByName(
-      directChildElements(rootRegistersEl),
+      directChildElements(ctx.rootRegistersEl),
       ref,
-      budget,
+      ctx.budget,
+      ctx.dimTokenCache,
     );
     if (!rootHit.ok) return rootHit;
     return ok(rootHit.value ?? null);
@@ -874,9 +953,10 @@ const lookupSvdDerivedElement = (
   let container: Element | undefined;
   let startIndex = 0;
   const localFirstResult = findSvdChildByName(
-    directChildElements(rootRegistersEl),
+    directChildElements(ctx.rootRegistersEl),
     parts[0]!,
-    budget,
+    ctx.budget,
+    ctx.dimTokenCache,
   );
   if (!localFirstResult.ok) return localFirstResult;
   const localFirst = localFirstResult.value;
@@ -886,9 +966,10 @@ const lookupSvdDerivedElement = (
     startIndex = 1;
   } else {
     const periphHit = findSvdPeripheralRegistersByName(
-      peripheralElements,
+      ctx.peripheralElements,
       parts[0]!,
-      budget,
+      ctx.budget,
+      ctx.dimTokenCache,
     );
     if (!periphHit.ok) return periphHit;
     container = periphHit.value;
@@ -900,7 +981,8 @@ const lookupSvdDerivedElement = (
     const matchResult = findSvdChildByName(
       directChildElements(cursorEl),
       parts[idx]!,
-      budget,
+      ctx.budget,
+      ctx.dimTokenCache,
     );
     if (!matchResult.ok) return matchResult;
     const match = matchResult.value;
@@ -953,6 +1035,7 @@ const resolveSvdTreeTemplate = (
     readonly rootRegistersEl: Element;
     readonly peripheralElements: readonly Element[];
     readonly descCache: WeakMap<Element, string | null>;
+    readonly dimTokenCache: WeakMap<Element, readonly string[]>;
     readonly budget: SvdExpansionBudget;
   },
 ): Result<
@@ -996,13 +1079,13 @@ const resolveSvdTreeTemplate = (
         `CMSIS-SVD ${tag} '${rawName}' derivedFrom chain exceeds maximum depth ${MAX_SVD_CLUSTER_DEPTH}`,
       );
     }
-    const targetResult = lookupSvdDerivedElement(
-      nextRef,
-      ctx.currentChildren,
-      ctx.rootRegistersEl,
-      ctx.peripheralElements,
-      ctx.budget,
-    );
+    const targetResult = lookupSvdDerivedElement(nextRef, {
+      currentChildren: ctx.currentChildren,
+      rootRegistersEl: ctx.rootRegistersEl,
+      peripheralElements: ctx.peripheralElements,
+      budget: ctx.budget,
+      dimTokenCache: ctx.dimTokenCache,
+    });
     if (!targetResult.ok) return targetResult;
     const target = targetResult.value;
     if (target === null || elementTagLower(target) !== tag) {
@@ -1058,6 +1141,7 @@ const parseSvdRegisterTree = (
     readonly budget: SvdExpansionBudget;
     readonly peripheralElements: readonly Element[];
     readonly descCache: WeakMap<Element, string | null>;
+    readonly dimTokenCache: WeakMap<Element, readonly string[]>;
   },
 ): Result<RawSvdRegister[], string> => {
   const results: RawSvdRegister[] = [];
@@ -1098,6 +1182,7 @@ const parseSvdRegisterTree = (
         rootRegistersEl: registersContainer,
         peripheralElements: ctx.peripheralElements,
         descCache: ctx.descCache,
+        dimTokenCache: ctx.dimTokenCache,
         budget: ctx.budget,
       });
       if (!resolvedTemplate.ok) return resolvedTemplate;
@@ -1136,27 +1221,42 @@ const parseSvdRegisterTree = (
             `CMSIS-SVD expanded register count exceeds maximum ${MAX_SVD_TOTAL_REGISTERS} registers`,
           );
         }
-        const descLen =
-          resolvedTemplate.value.description?.length ?? rawName.length;
-        const textCharge = chargeSvdTextBudget(
-          ctx.budget,
-          count * (work.prefix.length + rawName.length + descLen + 8),
-        );
-        if (!textCharge.ok) return textCharge;
-      } else {
-        const textCharge = chargeSvdTextBudget(
-          ctx.budget,
-          count * (work.prefix.length + rawName.length + 4),
-        );
-        if (!textCharge.ok) return textCharge;
       }
 
-      const step = dimInc ?? 0n;
-      const tokens =
-        dimVal === null
-          ? [""]
-          : expandDimIndices(count, directChildText(itemEl, "dimindex"));
+      let tokens: readonly string[] = [""];
+      if (dimVal !== null) {
+        const tokensResult = resolveSvdDimTokens(
+          itemEl,
+          count,
+          ctx.budget,
+          ctx.dimTokenCache,
+        );
+        if (!tokensResult.ok) return tokensResult;
+        tokens = tokensResult.value;
+      }
+      const placeholderCount =
+        dimVal === null ? 0 : countDimPlaceholders(rawName);
       const normalizedDesc = resolvedTemplate.value.description;
+
+      let projectedChars = 0;
+      for (let idx = 0; idx < count; idx += 1) {
+        const token = tokens[idx] ?? String(idx);
+        const instanceNameLen =
+          dimVal === null
+            ? rawName.length
+            : projectedDimNameLength(rawName, placeholderCount, token);
+        if (tag === "cluster") {
+          projectedChars += work.prefix.length + instanceNameLen + 4;
+        } else {
+          const descLen =
+            normalizedDesc !== null ? normalizedDesc.length : instanceNameLen;
+          projectedChars += work.prefix.length + instanceNameLen + descLen + 8;
+        }
+      }
+      const textCharge = chargeSvdTextBudget(ctx.budget, projectedChars);
+      if (!textCharge.ok) return textCharge;
+
+      const step = dimInc ?? 0n;
 
       for (let idx = 0; idx < count; idx += 1) {
         const token = tokens[idx] ?? String(idx);
@@ -1439,6 +1539,7 @@ export const parseCmsisSvd = (
     remainingTextChars: MAX_SVD_EXPANDED_TEXT_CHARS,
   };
   const descCache = new WeakMap<Element, string | null>();
+  const dimTokenCache = new WeakMap<Element, readonly string[]>();
   const peripheralElements = directChildElements(peripheralsEl, "peripheral");
 
   const limitations: string[] = [];
@@ -1520,6 +1621,7 @@ export const parseCmsisSvd = (
         budget,
         peripheralElements,
         descCache,
+        dimTokenCache,
       });
       if (!parsedRegs.ok) return parsedRegs;
       registers = parsedRegs.value;
@@ -1534,12 +1636,32 @@ export const parseCmsisSvd = (
       }
     }
 
-    const step = dimInc ?? 0n;
-    const tokens =
-      dimVal === null
-        ? [""]
-        : expandDimIndices(count, directChildText(periphEl, "dimindex"));
+    let tokens: readonly string[] = [""];
+    if (dimVal !== null) {
+      const tokensResult = resolveSvdDimTokens(
+        periphEl,
+        count,
+        budget,
+        dimTokenCache,
+      );
+      if (!tokensResult.ok) return tokensResult;
+      tokens = tokensResult.value;
+    }
+    const placeholderCount = dimVal === null ? 0 : countDimPlaceholders(name);
     const group = directChildText(periphEl, "groupname");
+    let projectedPeriphChars = 0;
+    for (let idx = 0; idx < count; idx += 1) {
+      const token = tokens[idx] ?? String(idx);
+      const instanceNameLen =
+        dimVal === null
+          ? name.length
+          : projectedDimNameLength(name, placeholderCount, token);
+      projectedPeriphChars += instanceNameLen + (group?.length ?? 0) + 4;
+    }
+    const periphTextCharge = chargeSvdTextBudget(budget, projectedPeriphChars);
+    if (!periphTextCharge.ok) return periphTextCharge;
+
+    const step = dimInc ?? 0n;
 
     for (let idx = 0; idx < count; idx += 1) {
       const token = tokens[idx] ?? String(idx);
