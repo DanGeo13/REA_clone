@@ -378,6 +378,7 @@ describe("enhanced MCP tools", () => {
             relationship_coverage: {
               status: "unknown",
               reason: "Provider did not report relationship coverage.",
+              limited_directions: ["callees"],
             },
           },
         ],
@@ -390,6 +391,7 @@ describe("enhanced MCP tools", () => {
             relationship_coverage: {
               status: "unknown",
               reason: "Provider did not report relationship coverage.",
+              limited_directions: ["callees"],
             },
           },
           {
@@ -400,6 +402,7 @@ describe("enhanced MCP tools", () => {
             relationship_coverage: {
               status: "unknown",
               reason: "Provider did not report relationship coverage.",
+              limited_directions: ["callees"],
             },
           },
         ],

@@ -133,7 +133,8 @@ import {
   ghidraNotInListingLimitation,
   ghidraNotInProcedureLimitation,
   windowsP0Limitations,
-  limitationsFor,
+  ghidraOperationLimitations,
+  ghidraSessionCommonLimitations,
 } from "./GhidraProviderCapabilities.js";
 import { GHIDRA_PROVIDER_IDENTITY } from "./GhidraProviderMetadata.js";
 import {
@@ -923,6 +924,7 @@ export const createGhidraProviderClient = (input: {
         (policyReason === undefined
           ? undefined
           : new ProviderAdapterError("ghidra", operation, {
+              userMessage: policyReason,
               diagnostics: { reason: policyReason },
             }));
       if (extensionFailure === undefined && info.analysis_seeds !== undefined)
@@ -992,10 +994,14 @@ export const createGhidraProviderClient = (input: {
   const releaseLimitation = unverifiedGhidraBuildLimitation(
     prerequisites.value.providerVersion,
   );
-  const knownDefectLimitations = ghidraKnownProviderDefectLimitations(
-    prerequisites.value.providerVersion,
-  );
-  const sessionLimitations = (): readonly string[] => {
+  // Defect records apply only where their declared scope can match the
+  // target's architecture and the operation's dependence on flow recovery.
+  const knownDefectLimitations = (operation: string) =>
+    ghidraKnownProviderDefectLimitations(prerequisites.value.providerVersion, {
+      architecture: target.architecture,
+      operation,
+    });
+  const sessionLimitations = (operation: string): readonly string[] => {
     const restored = client.checkpointRestore?.();
     return [
       ...(restored === undefined
@@ -1017,7 +1023,7 @@ export const createGhidraProviderClient = (input: {
       ...disabledAnalyzerLimitations,
       ...pdbLimitations,
       ...(releaseLimitation === undefined ? [] : [releaseLimitation]),
-      ...knownDefectLimitations,
+      ...knownDefectLimitations(operation),
     ];
   };
   const nativeAotOwner =
@@ -1052,11 +1058,14 @@ export const createGhidraProviderClient = (input: {
             ],
           }),
       analysisProfile: committedProfile,
-      limitations: [
-        ...limitationsFor(operation, projection.source),
-        ...(observation.limitations ?? []),
-        ...sessionLimitations(),
-      ],
+      ...sessionScopedLimitations(
+        ghidraSessionCommonLimitations(projection.source),
+        [
+          ...ghidraOperationLimitations(operation, projection.source),
+          ...(observation.limitations ?? []),
+        ],
+        sessionLimitations(operation),
+      ),
     });
   };
   const inventoryExecution = (
@@ -1150,10 +1159,11 @@ export const createGhidraProviderClient = (input: {
         return ok(
           createAnalysisExecution(started.value, committedProfile.provider, {
             analysisProfile: committedProfile,
-            limitations: [
-              ...ghidraHealthLimitations(projection.source),
-              ...sessionLimitations(),
-            ],
+            ...sessionScopedLimitations(
+              ghidraHealthLimitations(projection.source),
+              [],
+              sessionLimitations(operation),
+            ),
           }),
         );
       }
@@ -1458,3 +1468,16 @@ const ghidraClientPrerequisites = (
     profile,
   });
 };
+
+/**
+ * Keep every limitation inline in source order and name the entries that
+ * describe the session, not the call: the common base and the session facts.
+ */
+const sessionScopedLimitations = (
+  common: readonly string[],
+  operation: readonly string[],
+  session: readonly string[],
+) => ({
+  limitations: [...common, ...operation, ...session],
+  sessionLimitations: [...common, ...session],
+});
