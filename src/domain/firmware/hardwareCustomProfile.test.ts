@@ -807,4 +807,128 @@ describe("CMSIS-SVD XML comments and iterative traversal", () => {
       error: "CMSIS-SVD expanded text exceeds maximum 16 MiB character budget",
     });
   });
+
+  it("treats $-patterns in SVD dimIndex tokens literally without suffix expansion", () => {
+    const parsed = parseCmsisSvd(`
+      <device><name>DollarDim</name><peripherals>
+        <peripheral>
+          <name>P0</name>
+          <baseAddress>0x40000000</baseAddress>
+          <registers>
+            <register>
+              <dim>2</dim>
+              <dimIncrement>0x4</dimIncrement>
+              <dimIndex>$',$$</dimIndex>
+              <name>REG_%s_SUFFIX</name>
+              <addressOffset>0x0</addressOffset>
+            </register>
+          </registers>
+        </peripheral>
+      </peripherals></device>
+    `);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(
+      parsed.value.peripherals[0]?.registers.map((r) => r.mnemonic),
+    ).toEqual(["P0_REG_$'_SUFFIX", "P0_REG_$$_SUFFIX"]);
+  });
+
+  it("carries the resolved peripheral scope across multi-hop register derivedFrom chains", () => {
+    const parsed = parseCmsisSvd(`
+      <device><name>CrossScopeDerived</name><size>32</size><peripherals>
+        <peripheral>
+          <name>P0</name>
+          <baseAddress>0x40000000</baseAddress>
+          <registers>
+            <register><name>R0</name><addressOffset>0x0</addressOffset><size>8</size><description>P0 byte template</description></register>
+            <register derivedFrom="R0"><name>R1</name><addressOffset>0x1</addressOffset></register>
+          </registers>
+        </peripheral>
+        <peripheral>
+          <name>P1</name>
+          <baseAddress>0x40001000</baseAddress>
+          <registers>
+            <register><name>R0</name><addressOffset>0x0</addressOffset><size>32</size><description>P1 wide decoy</description></register>
+            <register derivedFrom="P0.R1"><name>R2</name><addressOffset>0x4</addressOffset></register>
+          </registers>
+        </peripheral>
+      </peripherals></device>
+    `);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const p1 = parsed.value.peripherals.find((p) => p.name === "P1");
+    expect(p1?.sizeBytes).toBe(5);
+    const r2 = p1?.registers.find((r) => r.mnemonic === "P1_R2");
+    expect(r2?.name).toBe("P1 P0 byte template");
+  });
+
+  it("rejects oversized or byte-mismatched Devicetree ranges cell widths without stalling", () => {
+    const dt = sampleDevicetree();
+    const oversizedCells = new Array<number>(1027).fill(1);
+    const badBusNodes = dt.nodes.map((node) =>
+      node.path === "/soc"
+        ? {
+            ...node,
+            properties: [
+              buildProp("compatible", { strings: ["simple-bus"] }),
+              buildProp("#address-cells", { cells: [1024] }),
+              buildProp("#size-cells", { cells: [1] }),
+              buildProp("ranges", {
+                bytes: oversizedCells.length * 4,
+                cells: oversizedCells,
+              }),
+            ],
+          }
+        : node,
+    );
+    const oversizedResult = hardwareProfileFromDevicetree({
+      ...dt,
+      nodes: badBusNodes,
+      coverage: {
+        ...dt.coverage,
+        examined_nodes: badBusNodes.length,
+      },
+    });
+    expect(oversizedResult.ok).toBe(true);
+    if (oversizedResult.ok) {
+      expect(
+        oversizedResult.value.limitations.some((line) =>
+          line.includes("ranges at /soc has unsupported cell widths."),
+        ),
+      ).toBe(true);
+    }
+
+    const mismatchedNodes = dt.nodes.map((node) =>
+      node.path === "/soc"
+        ? {
+            ...node,
+            properties: [
+              buildProp("compatible", { strings: ["simple-bus"] }),
+              buildProp("#address-cells", { cells: [1] }),
+              buildProp("#size-cells", { cells: [1] }),
+              buildProp("ranges", {
+                bytes: 32,
+                cells: [0x7e000000, 0x0, 0xfe000000, 0x01800000],
+              }),
+            ],
+          }
+        : node,
+    );
+    const mismatchedResult = hardwareProfileFromDevicetree({
+      ...dt,
+      nodes: mismatchedNodes,
+      coverage: {
+        ...dt.coverage,
+        examined_nodes: mismatchedNodes.length,
+      },
+    });
+    expect(mismatchedResult.ok).toBe(true);
+    if (mismatchedResult.ok) {
+      expect(
+        mismatchedResult.value.limitations.some((line) =>
+          line.includes("ranges at /soc has mismatched cell and byte counts."),
+        ),
+      ).toBe(true);
+    }
+  });
 });

@@ -264,10 +264,17 @@ type BusMapping =
   | { readonly kind: "device_bus" };
 
 const UNSIGNED_INT_TEXT = /^(?:0x[0-9a-fA-F]+|\d+)$/u;
+const MAX_NUMERIC_LITERAL_CHARS = 128;
+const MAX_FDT_CELL_WIDTH = 4;
+const MAX_FDT_RANGE_CELLS = 4096;
+const MAX_FDT_DEPTH = 256;
 
 const parseUnsignedBigInt = (raw: string | null): bigint | null => {
   if (raw === null) return null;
   const trimmed = raw.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_NUMERIC_LITERAL_CHARS) {
+    return null;
+  }
   if (!UNSIGNED_INT_TEXT.test(trimmed)) return null;
   try {
     const parsed = BigInt(trimmed);
@@ -322,6 +329,7 @@ const validateAcyclicDevicetree = (
   nodes: Devicetree["nodes"],
   byPath: ReadonlyMap<string, Devicetree["nodes"][number]>,
 ): Result<void, string> => {
+  const depthByPath = new Map<string, number>([["/", 0]]);
   for (const node of nodes) {
     if (node.path === "/") {
       if (node.parent !== null) {
@@ -332,15 +340,28 @@ const validateAcyclicDevicetree = (
     if (node.parent === null) {
       return err(`Devicetree non-root node '${node.path}' is missing a parent`);
     }
+    const chain: string[] = [node.path];
     const seen = new Set<string>([node.path]);
     let cursor: string | null = node.parent;
+    let baseDepth = 0;
     while (cursor !== null) {
+      const knownDepth = depthByPath.get(cursor);
+      if (knownDepth !== undefined) {
+        baseDepth = knownDepth;
+        break;
+      }
       if (seen.has(cursor)) {
         return err(
           `Devicetree contains a cyclic parent link involving '${node.path}'`,
         );
       }
+      if (chain.length >= MAX_FDT_DEPTH) {
+        return err(
+          `Devicetree node '${node.path}' exceeds maximum depth ${MAX_FDT_DEPTH}`,
+        );
+      }
       seen.add(cursor);
+      chain.push(cursor);
       const parentNode = byPath.get(cursor);
       if (parentNode === undefined) {
         return err(
@@ -349,8 +370,36 @@ const validateAcyclicDevicetree = (
       }
       cursor = parentNode.parent;
     }
+    for (let idx = chain.length - 1; idx >= 0; idx -= 1) {
+      baseDepth += 1;
+      if (baseDepth > MAX_FDT_DEPTH) {
+        return err(
+          `Devicetree node '${node.path}' exceeds maximum depth ${MAX_FDT_DEPTH}`,
+        );
+      }
+      depthByPath.set(chain[idx]!, baseDepth);
+    }
   }
   return ok(undefined);
+};
+
+const readFdtCellWidth = (
+  node: Devicetree["nodes"][number] | undefined,
+  name: string,
+  fallback: number,
+): number | null => {
+  if (node === undefined) return fallback;
+  const prop = nodeProperty(node, name);
+  if (prop === undefined) return fallback;
+  if (
+    prop.bytes !== 4 ||
+    prop.derived.cells === null ||
+    prop.derived.cells.length !== 1
+  ) {
+    return null;
+  }
+  const width = prop.derived.cells[0]!;
+  return width >= 0 && width <= MAX_FDT_CELL_WIDTH ? width : null;
 };
 
 const parseBusMapping = (
@@ -360,8 +409,21 @@ const parseBusMapping = (
   if (node.path === "/") return { kind: "identity" };
   const ranges = nodeProperty(node, "ranges");
   if (ranges === undefined) return { kind: "device_bus" };
-  if (ranges.bytes === 0) return { kind: "identity" };
+  if (ranges.bytes === 0) {
+    return ranges.derived.cells !== null && ranges.derived.cells.length > 0
+      ? {
+          kind: "untranslated",
+          reason: `ranges at ${node.path} has mismatched cell and byte counts.`,
+        }
+      : { kind: "identity" };
+  }
   const cells = ranges.derived.cells;
+  if (cells !== null && cells.length * 4 !== ranges.bytes) {
+    return {
+      kind: "untranslated",
+      reason: `ranges at ${node.path} has mismatched cell and byte counts.`,
+    };
+  }
   if (
     cells === null &&
     (ranges.truncated ||
@@ -373,20 +435,26 @@ const parseBusMapping = (
       reason: `ranges at ${node.path} exceeds 256-byte preview; child reg addresses were not mapped to CPU space.`,
     };
   }
-  const childAddrCells =
-    nodeProperty(node, "#address-cells")?.derived.cells?.[0] ?? 2;
-  const childSizeCells =
-    nodeProperty(node, "#size-cells")?.derived.cells?.[0] ?? 1;
+  const childAddrCells = readFdtCellWidth(node, "#address-cells", 2);
+  const childSizeCells = readFdtCellWidth(node, "#size-cells", 1);
   const parentNode = node.parent === null ? undefined : byPath.get(node.parent);
-  const parentAddrCells =
-    (parentNode === undefined
-      ? undefined
-      : nodeProperty(parentNode, "#address-cells")
-    )?.derived.cells?.[0] ?? 2;
+  const parentAddrCells = readFdtCellWidth(parentNode, "#address-cells", 2);
+  if (
+    childAddrCells === null ||
+    childSizeCells === null ||
+    parentAddrCells === null
+  ) {
+    return {
+      kind: "untranslated",
+      reason: `ranges at ${node.path} has unsupported cell widths.`,
+    };
+  }
   const tupleCells = childAddrCells + parentAddrCells + childSizeCells;
+  const totalCells = cells !== null ? cells.length : ranges.bytes / 4;
   if (
     tupleCells === 0 ||
     childSizeCells === 0 ||
+    totalCells > MAX_FDT_RANGE_CELLS ||
     ranges.bytes % (tupleCells * 4) !== 0 ||
     (cells !== null && cells.length % tupleCells !== 0)
   ) {
@@ -396,7 +464,6 @@ const parseBusMapping = (
     };
   }
   const tuples: RangeTuple[] = [];
-  const totalCells = cells !== null ? cells.length : ranges.bytes / 4;
   const readRangeCells = (offset: number, count: number): bigint =>
     cells !== null
       ? readUintCells(cells, offset, count)
@@ -707,6 +774,9 @@ const elementAttributeCaseInsensitive = (
 const parseSvdInt = (raw: string | null): bigint | null => {
   if (raw === null || raw.length === 0) return null;
   const trimmed = raw.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_NUMERIC_LITERAL_CHARS) {
+    return null;
+  }
   const normalized = trimmed.startsWith("#")
     ? `0b${trimmed.slice(1)}`
     : trimmed;
@@ -792,7 +862,7 @@ const resolveSvdDimTokens = (
 
 const formatDimName = (template: string, indexToken: string): string =>
   template.includes("%s")
-    ? template.replaceAll("%s", indexToken)
+    ? template.replaceAll("%s", () => indexToken)
     : `${template}${indexToken}`;
 
 const parseSvdBitWidthToBytes = (raw: string | null): number | null => {
@@ -920,6 +990,16 @@ const findSvdPeripheralRegistersByName = (
   return ok(undefined);
 };
 
+const owningRegistersRoot = (element: Element): Element | null => {
+  let cursor: Node | null = element.parentNode;
+  while (cursor !== null && cursor.nodeType === 1) {
+    const parentEl = cursor as Element;
+    if (elementTagLower(parentEl) === "registers") return parentEl;
+    cursor = parentEl.parentNode;
+  }
+  return null;
+};
+
 const lookupSvdDerivedElement = (
   ref: string,
   ctx: {
@@ -952,28 +1032,45 @@ const lookupSvdDerivedElement = (
   if (parts.length === 0) return ok(null);
   let container: Element | undefined;
   let startIndex = 0;
-  const localFirstResult = findSvdChildByName(
-    directChildElements(ctx.rootRegistersEl),
+  const siblingClusterResult = findSvdChildByName(
+    ctx.currentChildren,
     parts[0]!,
     ctx.budget,
     ctx.dimTokenCache,
   );
-  if (!localFirstResult.ok) return localFirstResult;
-  const localFirst = localFirstResult.value;
-  if (localFirst !== undefined && elementTagLower(localFirst) === "cluster") {
-    if (parts.length === 1) return ok(localFirst);
-    container = localFirst;
+  if (!siblingClusterResult.ok) return siblingClusterResult;
+  const siblingCluster = siblingClusterResult.value;
+  if (
+    siblingCluster !== undefined &&
+    elementTagLower(siblingCluster) === "cluster"
+  ) {
+    if (parts.length === 1) return ok(siblingCluster);
+    container = siblingCluster;
     startIndex = 1;
   } else {
-    const periphHit = findSvdPeripheralRegistersByName(
-      ctx.peripheralElements,
+    const localFirstResult = findSvdChildByName(
+      directChildElements(ctx.rootRegistersEl),
       parts[0]!,
       ctx.budget,
       ctx.dimTokenCache,
     );
-    if (!periphHit.ok) return periphHit;
-    container = periphHit.value;
-    startIndex = 1;
+    if (!localFirstResult.ok) return localFirstResult;
+    const localFirst = localFirstResult.value;
+    if (localFirst !== undefined && elementTagLower(localFirst) === "cluster") {
+      if (parts.length === 1) return ok(localFirst);
+      container = localFirst;
+      startIndex = 1;
+    } else {
+      const periphHit = findSvdPeripheralRegistersByName(
+        ctx.peripheralElements,
+        parts[0]!,
+        ctx.budget,
+        ctx.dimTokenCache,
+      );
+      if (!periphHit.ok) return periphHit;
+      container = periphHit.value;
+      startIndex = 1;
+    }
   }
   if (container === undefined || startIndex >= parts.length) return ok(null);
   let cursorEl: Element | undefined = container;
@@ -1066,6 +1163,9 @@ const resolveSvdTreeTemplate = (
   const chainNewestFirst: Element[] = [itemEl];
   const visited = new Set<Element>([itemEl]);
   let nextRef: string | null = firstDerived;
+  let scopeChildren: readonly Element[] = ctx.currentChildren;
+  let scopeRootRegistersEl: Element =
+    owningRegistersRoot(itemEl) ?? ctx.rootRegistersEl;
 
   while (nextRef !== null) {
     ctx.budget.remainingSteps -= 1;
@@ -1080,8 +1180,8 @@ const resolveSvdTreeTemplate = (
       );
     }
     const targetResult = lookupSvdDerivedElement(nextRef, {
-      currentChildren: ctx.currentChildren,
-      rootRegistersEl: ctx.rootRegistersEl,
+      currentChildren: scopeChildren,
+      rootRegistersEl: scopeRootRegistersEl,
       peripheralElements: ctx.peripheralElements,
       budget: ctx.budget,
       dimTokenCache: ctx.dimTokenCache,
@@ -1100,6 +1200,11 @@ const resolveSvdTreeTemplate = (
     }
     visited.add(target);
     chainNewestFirst.push(target);
+    scopeChildren =
+      target.parentNode !== null && target.parentNode.nodeType === 1
+        ? directChildElements(target.parentNode as Element)
+        : [];
+    scopeRootRegistersEl = owningRegistersRoot(target) ?? scopeRootRegistersEl;
     nextRef = elementAttributeCaseInsensitive(target, "derivedfrom");
   }
 
