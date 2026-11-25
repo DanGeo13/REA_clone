@@ -602,20 +602,22 @@ kind and bit index in `registerAlias`.
 
 Every hardware statement carries its rule and basis in `hardwareClaims`:
 
-| Rule                    | Settled basis         | Stays unsettled when                                                            |
-| ----------------------- | --------------------- | ------------------------------------------------------------------------------- |
-| `observed-address`      | `observed_address`    | the address comes from rounding a page the instruction did not access           |
-| `chip-manual-name`      | `chip_manual`         | no observed address falls inside a controller window of the active chip map     |
-| `architecture-register` | `architecture_manual` | the register placement is chosen by the board, such as a GIC, CLINT or PLIC map |
-| `explicit-profile`      | `explicit_profile`    | the CPU family alone would assign a board memory window or custom map           |
-| `instruction-decode`    | `instruction`         | the image's own bit operations do not compute the field split                   |
-| `installed-part`        | `observed_address`    | a probe table lists multiple parts, or the only text is a device name           |
-| `driver-linkage`        | `observed_address`    | a string's presence is treated as proof that the driver runs during boot        |
-| `board-record`          | `explicit_profile`    | a schematic/BSP attachment is conflated with runtime firmware execution         |
+| Rule                    | Settled basis         | Stays unsettled when                                                             |
+| ----------------------- | --------------------- | -------------------------------------------------------------------------------- |
+| `observed-address`      | `observed_address`    | the address comes from rounding a page the instruction did not access            |
+| `chip-manual-name`      | `chip_manual`         | no observed address falls inside a controller window of the active chip map      |
+| `architecture-register` | `architecture_manual` | the register placement is chosen by the board, such as a GIC, CLINT or PLIC map  |
+| `explicit-profile`      | `explicit_profile`    | no caller-selected memory map or register placement covers the window            |
+| `instruction-decode`    | `instruction`         | the image's own bit operations do not compute the field split                    |
+| `installed-part`        | `observed_address`    | a probe table lists multiple parts, `answered` is false, or only a name is given |
+| `driver-linkage`        | `observed_address`    | a string's presence is treated as proof that the driver runs during boot         |
+| `board-record`          | — (`unsettled` only)  | always unsettled; records unbound board devices or open board-level uncertainty  |
 
 Tied SoC catalog candidates and equal-sized overlapping custom windows preserve
 observed MMIO coverage while leaving `controllerName` `null` and recording the
 ambiguity in `limitations`. Inline `svd_xml` inputs are bounded to 16 MiB,
-200,000 XML nodes, 16 `derivedFrom` hops, 65,536 expansion steps, and 8 MiB of
-expanded text characters; `devicetree` bus translations enforce FDT 0..4 cell
-widths and depth 256.
+500,000 XML nodes, 1,024 `<dim>` elements per array, 32,768 expanded registers,
+65,536 expansion steps, 16 MiB of expanded text characters, depth 64 for cluster
+nesting and register/cluster `derivedFrom` chains, and acyclic iterative
+peripheral `derivedFrom` resolution; `devicetree` bus translations enforce FDT
+0..4 cell widths, 4,096 `ranges` cells per bus, and depth 256.

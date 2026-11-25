@@ -85,10 +85,8 @@ import {
 } from "./ProcedureAddressResolution.js";
 import { traceLiteralFeature } from "./EnhancedLiteralTracing.js";
 import { projectNativeApiInspection } from "./native/NativeApiInspection.js";
-import {
-  projectHardwarePeripheralReconstruction,
-  reconstructProcedureHardwareInteractions,
-} from "./firmware/HardwarePeripheralReconstructionService.js";
+import { projectHardwarePeripheralReconstruction } from "../domain/firmware/hardwarePeripheralReconstructionSchema.js";
+import { reconstructProcedureHardwareInteractions } from "./firmware/HardwarePeripheralReconstructionService.js";
 
 type BatchResolution = {
   readonly address: string;

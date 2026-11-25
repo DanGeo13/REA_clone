@@ -52,11 +52,8 @@ import {
   type SocPlatformMatchCandidate,
 } from "../../domain/firmware/socPeripheralDatabase.js";
 import {
-  hardwarePeripheralReconstructionSchema,
-  projectHardwarePeripheralReconstruction,
   reconstructProcedureHardwareInputSchema,
   type BoardMemoryAccess,
-  type CustomHardwareProfileIdentity,
   type HardwarePeripheralReconstruction,
   type HardwareProducingSource,
   type ReconstructedPeripheralBlock,
@@ -72,18 +69,6 @@ import {
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { err, ok, type Result } from "../../domain/result.js";
 import { procedureReferencesSchema } from "../../domain/native/procedureReferences.js";
-
-export {
-  hardwarePeripheralReconstructionSchema,
-  projectHardwarePeripheralReconstruction,
-  reconstructProcedureHardwareInputSchema,
-  type BoardMemoryAccess,
-  type CustomHardwareProfileIdentity,
-  type HardwarePeripheralReconstruction,
-  type HardwareProducingSource,
-  type ReconstructedPeripheralBlock,
-  type ReconstructProcedureHardwareInput,
-};
 
 export interface ReconstructHardwareOptions {
   readonly subjectSha256?: string | null;

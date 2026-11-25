@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { hardwarePeripheralReconstructionSchema } from "../../domain/firmware/hardwarePeripheralReconstructionSchema.js";
 import {
-  hardwarePeripheralReconstructionSchema,
   reconstructHardwareFromReferences,
   reconstructProcedureHardwareInteractions,
 } from "./HardwarePeripheralReconstructionService.js";
