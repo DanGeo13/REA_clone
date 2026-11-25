@@ -173,6 +173,7 @@ const promoteTiedCatalogMmio = (
     isMmio: true,
     peripheralBlockBase: `0x${blockBaseValue.toString(16)}`,
     peripheralBlockOffset: `0x${(attribution.addressValue - blockBaseValue).toString(16)}`,
+    controllerId: null,
     controllerName: null,
     controllerBasis: "observed_address",
   };
@@ -200,7 +201,9 @@ const enrichBlock = (
   ctx: EnrichBlockContext,
 ): ReconstructedPeripheralBlock => {
   const matchedNames = new Set<string>();
-  const matchedCustomControllerIds = new Set<string>();
+  const matchedCustomControllerIds = new Set<string>(
+    block.controllerId != null ? [block.controllerId] : [],
+  );
   const matchedSocNames = new Set<string>();
   let primaryBus: string | null = null;
   let blockBasis: ControllerNameBasis = controllerNameBasis(false);

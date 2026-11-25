@@ -151,17 +151,43 @@ export type CustomPeripheralLookupResult =
 export const formatAmbiguousPeripheralCandidates = (
   candidates: readonly CustomPeripheralWindow[],
 ): readonly string[] => {
-  const counts = new Map<string, number>();
+  const nameCounts = new Map<string, number>();
+  const nameBusCounts = new Map<string, number>();
   for (const item of candidates) {
-    counts.set(item.name, (counts.get(item.name) ?? 0) + 1);
+    nameCounts.set(item.name, (nameCounts.get(item.name) ?? 0) + 1);
+    const nameBusKey = `${item.name}\u0000${item.bus ?? ""}`;
+    nameBusCounts.set(nameBusKey, (nameBusCounts.get(nameBusKey) ?? 0) + 1);
   }
   return candidates
-    .map((item) =>
-      (counts.get(item.name) ?? 0) > 1 && item.bus !== null
-        ? `${item.name} (${item.bus})`
-        : item.name,
-    )
+    .map((item) => {
+      if ((nameCounts.get(item.name) ?? 0) <= 1) return item.name;
+      const nameBusKey = `${item.name}\u0000${item.bus ?? ""}`;
+      if ((nameBusCounts.get(nameBusKey) ?? 0) <= 1 && item.bus !== null) {
+        return `${item.name} (${item.bus})`;
+      }
+      if (item.controllerId && item.controllerId !== item.name) {
+        return `${item.name} (${item.controllerId})`;
+      }
+      return item.bus !== null ? `${item.name} (${item.bus})` : item.name;
+    })
     .sort();
+};
+
+const peripheralRegisterIndexCache = new WeakMap<
+  CustomPeripheralWindow,
+  ReturnType<typeof keyedBy<CustomPeripheralRegister, string>>
+>();
+
+const keyedPeripheralRegisters = (
+  peripheral: CustomPeripheralWindow,
+): ReturnType<typeof keyedBy<CustomPeripheralRegister, string>> => {
+  const cached = peripheralRegisterIndexCache.get(peripheral);
+  if (cached !== undefined) return cached;
+  const built = keyedBy(peripheral.registers, (entry) =>
+    entry.offset.toString(16),
+  );
+  peripheralRegisterIndexCache.set(peripheral, built);
+  return built;
 };
 
 /**
@@ -182,6 +208,10 @@ export const lookupCustomPeripheral = (
   }[] = [];
 
   for (const peripheral of profile.peripherals) {
+    const outerEnd = peripheral.baseAddressValue + BigInt(peripheral.sizeBytes);
+    if (address < peripheral.baseAddressValue || address >= outerEnd) {
+      continue;
+    }
     if (peripheral.addressBlocks !== undefined) {
       let bestBlock: CustomPeripheralAddressBlock | undefined;
       for (const block of peripheral.addressBlocks) {
@@ -205,14 +235,11 @@ export const lookupCustomPeripheral = (
       }
       continue;
     }
-    const end = peripheral.baseAddressValue + BigInt(peripheral.sizeBytes);
-    if (address >= peripheral.baseAddressValue && address < end) {
-      containing.push({
-        peripheral,
-        matchedSize: peripheral.sizeBytes,
-        matchedStart: peripheral.baseAddressValue,
-      });
-    }
+    containing.push({
+      peripheral,
+      matchedSize: peripheral.sizeBytes,
+      matchedStart: peripheral.baseAddressValue,
+    });
   }
   if (containing.length === 0) return null;
 
@@ -239,9 +266,7 @@ export const lookupCustomPeripheral = (
   }
 
   const offset = address - selected.peripheral.baseAddressValue;
-  const keyedRegs = keyedBy(selected.peripheral.registers, (entry) =>
-    entry.offset.toString(16),
-  );
+  const keyedRegs = keyedPeripheralRegisters(selected.peripheral);
   const register =
     firstKeyed(keyedRegs, offset.toString(16), SVD_REGISTER_PRECEDENCE) ?? null;
   return {
@@ -1409,6 +1434,7 @@ interface RawSvdPeripheral {
   readonly base: bigint;
   readonly hasDeclaredAddressBlocks: boolean;
   readonly addressBlocks: readonly CustomPeripheralAddressBlock[];
+  readonly declaredMaxBlockEnd: number;
   readonly declaredByteWidth: number | null;
   readonly group: string | null;
   readonly registers: readonly RawSvdRegister[];
@@ -1418,6 +1444,7 @@ interface ResolvedSvdEntry {
   readonly window: CustomPeripheralWindow;
   readonly hasDeclaredAddressBlocks: boolean;
   readonly addressBlocks: readonly CustomPeripheralAddressBlock[];
+  readonly maxBlockEnd: number;
   readonly defaultRegBytes: number;
   readonly rawRegisters: readonly RawSvdRegister[];
 }
@@ -1496,17 +1523,25 @@ const buildResolvedSvdEntry = (
   const addressBlocks = item.hasDeclaredAddressBlocks
     ? item.addressBlocks
     : (parentEntry?.addressBlocks ?? []);
-
-  let maxBlockEnd = 0;
-  for (const block of addressBlocks) {
-    const absEnd = item.base + block.offset + BigInt(block.sizeBytes);
-    if (absEnd > 0xffffffffffffffffn) {
+  if (!item.hasDeclaredAddressBlocks && addressBlocks.length > 0) {
+    budget.remainingSteps -= addressBlocks.length;
+    if (budget.remainingSteps < 0) {
       return err(
-        `CMSIS-SVD peripheral '${item.name}' addressBlock exceeds 64-bit address bounds`,
+        `CMSIS-SVD expanded peripheral/addressBlock count exceeds maximum ${MAX_SVD_EXPANSION_STEPS} steps`,
       );
     }
-    const relEnd = Number(block.offset) + block.sizeBytes;
-    if (relEnd > maxBlockEnd) maxBlockEnd = relEnd;
+  }
+
+  const maxBlockEnd = item.hasDeclaredAddressBlocks
+    ? item.declaredMaxBlockEnd
+    : (parentEntry?.maxBlockEnd ?? 0);
+  if (
+    maxBlockEnd > 0 &&
+    item.base + BigInt(maxBlockEnd) > 0xffffffffffffffffn
+  ) {
+    return err(
+      `CMSIS-SVD peripheral '${item.name}' addressBlock exceeds 64-bit address bounds`,
+    );
   }
   const sizeBytes = hasDeclaredAddressBlocks
     ? Math.max(1, maxBlockEnd)
@@ -1528,6 +1563,7 @@ const buildResolvedSvdEntry = (
     window,
     hasDeclaredAddressBlocks,
     addressBlocks,
+    maxBlockEnd,
     defaultRegBytes,
     rawRegisters,
   });
@@ -1692,8 +1728,17 @@ export const parseCmsisSvd = (
     );
 
     const abElements = directChildElements(periphEl, "addressblock");
+    if (abElements.length > 0) {
+      budget.remainingSteps -= count * abElements.length;
+      if (budget.remainingSteps < 0) {
+        return err(
+          `CMSIS-SVD expanded peripheral/addressBlock count exceeds maximum ${MAX_SVD_EXPANSION_STEPS} steps`,
+        );
+      }
+    }
     const hasDeclaredAddressBlocks = abElements.length > 0;
     const addressBlocks: CustomPeripheralAddressBlock[] = [];
+    let declaredMaxBlockEnd = 0;
     for (const abEl of abElements) {
       const offsetText = directChildText(abEl, "offset");
       const blockOffset = offsetText === null ? 0n : parseSvdInt(offsetText);
@@ -1712,6 +1757,7 @@ export const parseCmsisSvd = (
       }
       const usage = directChildText(abEl, "usage")?.toLowerCase() ?? null;
       if (usage === "reserved") continue;
+      if (end > declaredMaxBlockEnd) declaredMaxBlockEnd = end;
       addressBlocks.push({
         offset: blockOffset,
         sizeBytes: sizeNum,
@@ -1787,6 +1833,7 @@ export const parseCmsisSvd = (
         base: instanceBase,
         hasDeclaredAddressBlocks,
         addressBlocks,
+        declaredMaxBlockEnd,
         declaredByteWidth,
         group,
         registers,

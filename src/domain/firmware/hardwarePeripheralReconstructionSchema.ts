@@ -78,7 +78,7 @@ export const reconstructProcedureHardwareInputSchema = z.strictObject({
     .max(0xffff)
     .optional()
     .describe(
-      "Optional ESP image header chip_id from inspect_firmware_image to select the matching Espressif SoC catalog",
+      "Optional ESP image header chip_id from inspect_artifact (esp-image or esp-flash-image format_metadata) to select the matching Espressif SoC catalog",
     ),
   uf2_family_id: z
     .number()
@@ -87,7 +87,7 @@ export const reconstructProcedureHardwareInputSchema = z.strictObject({
     .max(0xffffffff)
     .optional()
     .describe(
-      "Optional UF2 container family_id from inspect_firmware_image to select the matching MCU catalog",
+      "Optional UF2 region family_id from inspect_artifact (uf2-region format_metadata) to select the matching MCU catalog",
     ),
 });
 export type ReconstructProcedureHardwareInput = z.infer<
@@ -171,6 +171,7 @@ const hardwareAttributionJsonFields = {
   accessKind: z.enum(["read", "write", "read_write", "unknown"]),
   peripheralBlockBase: z.string(),
   peripheralBlockOffset: z.string(),
+  controllerId: z.string().nullable().optional(),
   controllerName: z.string().nullable(),
   controllerBasis: z.enum(CONTROLLER_NAME_BASES),
   ambiguousControllers: z.array(z.string()).optional(),
@@ -234,6 +235,7 @@ const reconstructionCommonFields = {
   peripheralBlocks: z.array(
     z.strictObject({
       blockBase: z.string(),
+      controllerId: z.string().nullable().optional(),
       regionName: z.string(),
       regionKind: hardwareMemoryRegionKindSchema,
       totalAccesses: z.number().int().min(0),

@@ -19,6 +19,7 @@ import {
   ghidraReferenceEdge,
 } from "../../domain/ghidraValues.fixture.js";
 import { RT_SPARK_FLASH_IMAGE_SHA256 } from "../../domain/firmware/boardDriverLayer.js";
+import type { Devicetree } from "../../domain/firmware/devicetree.js";
 
 describe("Hardware peripheral reconstruction from offline instruction references", () => {
   it("reconstructs peripheral blocks and identifies standard architectural registers", () => {
@@ -1813,5 +1814,122 @@ describe("overlapping custom profile MMIO windows", () => {
       boardDevices: [expect.objectContaining({ id: "usb-uart-com1" })],
       boardDrivers: [expect.objectContaining({ id: "serial-usart1" })],
     });
+
+    // Distinct Devicetree controllers translating to the same CPU base and display name stay in separate blocks
+    const sameBaseDtNodes = [
+      {
+        path: "/",
+        parent: null,
+        offset: 0,
+        properties: [
+          dtProp("#address-cells", 4, { cells: [1] }),
+          dtProp("#size-cells", 4, { cells: [1] }),
+        ],
+      },
+      {
+        path: "/bus0",
+        parent: "/",
+        offset: 32,
+        properties: [
+          dtProp("#address-cells", 4, { cells: [1] }),
+          dtProp("#size-cells", 4, { cells: [1] }),
+          dtProp("ranges", 12, { cells: [0x0, 0x1000, 0x1000] }),
+        ],
+      },
+      {
+        path: "/bus0/spi@0",
+        parent: "/bus0",
+        offset: 64,
+        properties: [
+          dtProp("reg", 8, { reg: [{ address: "0x0", size: "0x100" }] }),
+        ],
+      },
+      {
+        path: "/bus0/spi@0/flash@0",
+        parent: "/bus0/spi@0",
+        offset: 96,
+        properties: [
+          dtProp("compatible", 12, { strings: ["jedec,spi-nor"] }),
+          dtProp("reg", 4, { reg: [{ address: "0x0", size: null }] }),
+        ],
+      },
+      {
+        path: "/bus1",
+        parent: "/",
+        offset: 128,
+        properties: [
+          dtProp("#address-cells", 4, { cells: [1] }),
+          dtProp("#size-cells", 4, { cells: [1] }),
+          dtProp("ranges", 12, { cells: [0x0, 0x1000, 0x1000] }),
+        ],
+      },
+      {
+        path: "/bus1/spi@0",
+        parent: "/bus1",
+        offset: 160,
+        properties: [
+          dtProp("reg", 8, { reg: [{ address: "0x0", size: "0x400" }] }),
+        ],
+      },
+      {
+        path: "/bus1/spi@0/sensor@0",
+        parent: "/bus1/spi@0",
+        offset: 192,
+        properties: [
+          dtProp("compatible", 12, { strings: ["bosch,bme280"] }),
+          dtProp("reg", 4, { reg: [{ address: "0x0", size: null }] }),
+        ],
+      },
+    ];
+    const sameBaseDt: typeof dt = {
+      ...dt,
+      nodes: sameBaseDtNodes,
+      coverage: {
+        status: "complete",
+        examined_nodes: sameBaseDtNodes.length,
+        examined_properties: sameBaseDtNodes.reduce(
+          (sum, n) => sum + n.properties.length,
+          0,
+        ),
+      },
+    };
+    const sameBaseExec: AnalysisExecution = {
+      ...execution,
+      result: {
+        procedure: ghidraFunctionIdentity(),
+        direction: "outgoing",
+        reference_kinds_available: true,
+        references: [
+          { ...ghidraReferenceEdge(), target_address: "0x1004" },
+          { ...ghidraReferenceEdge(), target_address: "0x1200" },
+        ],
+        unresolved_calls: [],
+      },
+    };
+    const splitRes = await reconstructProcedureHardwareInteractions(
+      { execute: () => Promise.resolve(ok(sameBaseExec)) },
+      {
+        procedure: "dual_spi_io",
+        architecture: "arm64",
+        devicetree: sameBaseDt,
+      },
+    );
+    if (!splitRes.ok) throw splitRes.error;
+    expect(splitRes.value.peripheralBlocks).toHaveLength(2);
+    expect(
+      splitRes.value.peripheralBlocks.map((b) => ({
+        controllerId: b.controllerId,
+        devices: b.boardDevices.map((d) => d.id),
+      })),
+    ).toEqual([
+      {
+        controllerId: "/bus0/spi@0",
+        devices: ["/bus0/spi@0/flash@0"],
+      },
+      {
+        controllerId: "/bus1/spi@0",
+        devices: ["/bus1/spi@0/sensor@0"],
+      },
+    ]);
   });
 });

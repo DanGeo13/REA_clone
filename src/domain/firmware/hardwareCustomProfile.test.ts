@@ -931,4 +931,27 @@ describe("CMSIS-SVD XML comments and iterative traversal", () => {
       ).toBe(true);
     }
   });
+
+  it("rejects repeated inherited addressBlock expansions before scanning millions of intervals", () => {
+    const blocks = Array.from(
+      { length: 2048 },
+      (_, idx) =>
+        `<addressBlock><offset>0x${(idx * 4).toString(16)}</offset><size>0x4</size></addressBlock>`,
+    ).join("");
+    const derived = Array.from(
+      { length: 40 },
+      (_, idx) =>
+        `<peripheral derivedFrom="BASE"><dim>4</dim><dimIncrement>0x10000</dimIncrement><name>D${idx}_%s</name><baseAddress>0x${(0x40000000 + idx * 0x100000).toString(16)}</baseAddress></peripheral>`,
+    ).join("");
+    const parsed = parseCmsisSvd(
+      `<device><name>BlockFanout</name><peripherals>
+        <peripheral><name>BASE</name><baseAddress>0x30000000</baseAddress>${blocks}<registers/></peripheral>
+        ${derived}
+      </peripherals></device>`,
+    );
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.error).toContain("exceeds maximum 65536 steps");
+    }
+  });
 });

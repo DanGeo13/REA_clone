@@ -60,6 +60,7 @@ export interface HardwareAccessAttribution {
   readonly accessKind: HardwareAccessKind;
   readonly peripheralBlockBase: string;
   readonly peripheralBlockOffset: string;
+  readonly controllerId?: string | null;
   readonly controllerName: string | null;
   readonly controllerBasis: ControllerNameBasis;
   readonly ambiguousControllers?: readonly string[];
@@ -75,6 +76,7 @@ export interface HardwareAccessAttribution {
 /** Summarized hardware peripheral block with observed register accesses. */
 export interface HardwarePeripheralBlockSummary {
   readonly blockBase: string;
+  readonly controllerId?: string | null;
   readonly regionName: string;
   readonly regionKind: HardwareMemoryRegionKind;
   readonly totalAccesses: number;
@@ -140,6 +142,7 @@ export const attributeHardwareAccess = (
 
   let blockBaseValue: bigint;
   let blockOffsetValue: bigint;
+  let controllerId: string | null = null;
   let controllerName: string | null = null;
   let cBasis: ControllerNameBasis = "observed_address";
   let ambiguousControllers: readonly string[] | null = null;
@@ -154,6 +157,8 @@ export const attributeHardwareAccess = (
     isMmio = true;
     blockBaseValue = customMatch.peripheral.baseAddressValue;
     blockOffsetValue = addressValue - blockBaseValue;
+    controllerId =
+      customMatch.peripheral.controllerId ?? customMatch.peripheral.name;
     controllerName = customMatch.peripheral.name;
     cBasis = "explicit_profile";
   } else if (customMatch !== null && customMatch.kind === "ambiguous") {
@@ -162,6 +167,7 @@ export const attributeHardwareAccess = (
     isMmio = true;
     blockBaseValue = customMatch.baseAddressValue;
     blockOffsetValue = addressValue - blockBaseValue;
+    controllerId = null;
     controllerName = null;
     cBasis = "observed_address";
     ambiguousControllers = formatAmbiguousPeripheralCandidates(
@@ -176,6 +182,7 @@ export const attributeHardwareAccess = (
       aliasMatch !== null
         ? aliasMatch.registerOffsetValue
         : addressValue - socPeripheral.baseAddressValue;
+    controllerId = socPeripheral.name;
     controllerName = socPeripheral.name;
     cBasis = controllerNameBasis(true);
   } else {
@@ -234,6 +241,7 @@ export const attributeHardwareAccess = (
     accessKind,
     peripheralBlockBase: `0x${blockBaseValue.toString(16)}`,
     peripheralBlockOffset: `0x${blockOffsetValue.toString(16)}`,
+    ...(controllerId === null ? {} : { controllerId }),
     controllerName,
     controllerBasis: cBasis,
     ...(ambiguousControllers === null ? {} : { ambiguousControllers }),
@@ -262,6 +270,7 @@ export const summarizeHardwarePeripheralInteractions = (
   interface BlockAccumulator {
     readonly groupKey: string;
     readonly blockBase: string;
+    readonly controllerId: string | null;
     readonly regionName: string;
     readonly regionKind: HardwareMemoryRegionKind;
     totalAccesses: number;
@@ -281,9 +290,10 @@ export const summarizeHardwarePeripheralInteractions = (
     }
 
     mmioAccessCount += 1;
+    const resolvedControllerIdentity = item.controllerId ?? item.controllerName;
     const identityKey =
       item.controllerName !== null
-        ? `named:${item.controllerBasis}:${item.controllerName}`
+        ? `named:${item.controllerBasis}:${resolvedControllerIdentity ?? item.controllerName}`
         : item.ambiguousControllers && item.ambiguousControllers.length > 0
           ? `ambiguous:${item.ambiguousControllers.join("|")}`
           : "observed";
@@ -293,6 +303,7 @@ export const summarizeHardwarePeripheralInteractions = (
       block = {
         groupKey,
         blockBase: item.peripheralBlockBase,
+        controllerId: item.controllerId ?? item.controllerName,
         regionName: item.regionName,
         regionKind: item.regionKind,
         totalAccesses: 0,
@@ -329,6 +340,9 @@ export const summarizeHardwarePeripheralInteractions = (
     })
     .map((block) => ({
       blockBase: block.blockBase,
+      ...(block.controllerId === null
+        ? {}
+        : { controllerId: block.controllerId }),
       regionName: block.regionName,
       regionKind: block.regionKind,
       totalAccesses: block.totalAccesses,
