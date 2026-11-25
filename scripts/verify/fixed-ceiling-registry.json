@@ -615,5 +615,17 @@
       "issue": 14237,
       "reason": "SQLite worker diagnostic capture is a producer budget."
     }
+  },
+  "src/vsix/VsixPackageProvider.ts": {
+    "`The ${String(cause.failure.limit.maximum)}-node allowance for an extension.vsixmanifest document tree`": {
+      "class": "pending",
+      "issue": 14236,
+      "reason": "VSIX manifest XML node and JSON value allowances are resource policies."
+    },
+    "`The ${String(cause.failure.limit.maximum)}-value allowance for a parsed extension/package.json`": {
+      "class": "pending",
+      "issue": 14236,
+      "reason": "VSIX manifest XML node and JSON value allowances are resource policies."
+    }
   }
 }
