@@ -640,7 +640,7 @@ export const classifyArtifactHeader = (
 ): Pick<ArtifactNode, "format" | "architecture"> => {
   const {
     prefix,
-    suffix,
+    tail,
     iso9660Descriptor,
     mzWindowsHeaderSignature,
     mzWindowsHeaderRecord,
@@ -655,7 +655,7 @@ export const classifyArtifactHeader = (
   // bytes falls through too: the scan holds a bounded prefix, the trailer and
   // the ISO 9660 descriptor signature, so it cannot locate an ESP flash
   // partition table, and a flash dump is classified by its first image.
-  const input = { prefix, fileSize, suffix, iso9660Descriptor };
+  const input = { prefix, fileSize, tail, iso9660Descriptor };
   for (
     let recognition = recognizeArtifactFormat(input);
     recognition !== undefined;

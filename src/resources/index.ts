@@ -110,6 +110,7 @@ export {
   completedStableArtifact,
   completedStableArtifactStream,
   readStableArtifact,
+  readStableArtifactRanges,
   streamStableArtifact,
   withStableArtifactHandle,
 } from "./readStableArtifact.js";
