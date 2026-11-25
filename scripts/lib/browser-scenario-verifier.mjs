@@ -9,6 +9,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 import { browserScenarioSchema } from "../../dist/domain/browserScenario.js";
 import { requireMcpToolError } from "./mcp-verifier-results.mjs";
+import { completeEvidenceClient } from "./complete-evidence.mjs";
 
 const execute = promisify(execFile);
 
@@ -173,15 +174,17 @@ export async function verifyScenarioFailureEvidence(executable, origin) {
     env: process.env,
     stderr: "pipe",
   });
-  const client = new Client({
-    name: "browser-scenario-failure-e2e",
-    version: "1",
-  });
+  const client = completeEvidenceClient(
+    new Client({
+      name: "browser-scenario-failure-e2e",
+      version: "1",
+    }),
+  );
   try {
     await client.connect(transport);
     const result = await client.callTool({
       name: "capture_browser_scenario",
-      arguments: scenario,
+      arguments: { ...scenario, detail: "complete" },
     });
     assert.equal(result.isError, true);
     assertFailedNavigation(requireMcpToolError(result), scenario.start_url.url);

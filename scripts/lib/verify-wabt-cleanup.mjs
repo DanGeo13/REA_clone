@@ -17,6 +17,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { requireMcpToolError } from "./mcp-verifier-results.mjs";
 import { withVerifierCleanup } from "./verifier-cleanup.mjs";
 import { WABT_OPERATION_TIMEOUT_MS } from "./wabt-verifier-timeouts.mjs";
+import { completeEvidenceClient } from "./complete-evidence.mjs";
 const execute = promisify(execFile);
 /** Real WABT inspection with authored cleanup denials and same-connection recovery. */
 export async function verifyWabtCleanup(entrypoint, environment, parent) {
@@ -155,7 +156,9 @@ export async function verifyWabtCleanup(entrypoint, environment, parent) {
     }
     for (const mode of ["runtime-once", "runtime-until-allowed"]) {
       const c = await setup("mcp-" + mode, mode, valid);
-      const client = new Client({ name: "wabt-cleanup-probe", version: "1" });
+      const client = completeEvidenceClient(
+        new Client({ name: "wabt-cleanup-probe", version: "1" }),
+      );
       const transport = new StdioClientTransport({
         command: process.execPath,
         args: ["--import", preload, entrypoint, "mcp"],
@@ -167,7 +170,7 @@ export async function verifyWabtCleanup(entrypoint, environment, parent) {
         await client.connect(transport);
         const request = {
           name: "inspect_wasm_artifact",
-          arguments: { path: valid },
+          arguments: { detail: "complete", path: valid },
         };
         const call = () =>
           client.callTool(request, { timeout: WABT_OPERATION_TIMEOUT_MS });

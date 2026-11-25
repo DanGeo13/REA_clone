@@ -39,7 +39,7 @@ mcpTest(
       await writeFile(path, elfDependencyFixture({ bits: 32, little: false }));
       const response = await client.callTool({
         name: "inspect_elf_dependencies",
-        arguments: { path },
+        arguments: { detail: "complete", path },
       });
       expect(response.isError, JSON.stringify(response.content)).not.toBe(true);
       const evidence = dependenciesContract.outputSchema.parse(
@@ -48,7 +48,7 @@ mcpTest(
       expect(evidence.parameters).toEqual({ path });
       const selected = await client.callTool({
         name: "inspect_elf_dependencies",
-        arguments: { path, max_needed: 1024 },
+        arguments: { detail: "complete", path, max_needed: 1024 },
       });
       expect(selected.isError).not.toBe(true);
       const explicitlySelected = dependenciesContract.outputSchema.parse(
@@ -91,7 +91,7 @@ mcpTest(
       await writeFile(path, elfDependencyFixture({ stripped: true }));
       const response = await client.callTool({
         name: "inspect_elf_dependencies",
-        arguments: { path },
+        arguments: { detail: "complete", path },
       });
       expect(response.isError, JSON.stringify(response.content)).not.toBe(true);
       const evidence = dependenciesContract.outputSchema.parse(

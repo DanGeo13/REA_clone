@@ -40,7 +40,7 @@ mcpTest(
       await writeFile(path, createRustImage({ format: "elf" }));
       const response = await client.callTool({
         name: "inspect_rust_binary",
-        arguments: { path },
+        arguments: { detail: "complete", path },
       });
       expect(response.isError, JSON.stringify(response.content)).not.toBe(true);
       const evidence = toolContract("inspect_rust_binary").outputSchema.parse(
@@ -64,7 +64,7 @@ mcpTest(
       );
       const absent = await client.callTool({
         name: "inspect_rust_binary",
-        arguments: { path: missing },
+        arguments: { detail: "complete", path: missing },
       });
       expect(absent.isError).not.toBe(true);
       const absentEvidence = toolContract(
@@ -80,7 +80,7 @@ mcpTest(
       await writeFile(module, createRustWasmModule());
       const wasm = await client.callTool({
         name: "inspect_rust_binary",
-        arguments: { path: module },
+        arguments: { detail: "complete", path: module },
       });
       expect(wasm.isError, JSON.stringify(wasm.content)).not.toBe(true);
       expect(
@@ -110,7 +110,7 @@ mcpTest(
       await writeFile(path, createRustHashOverflowImage());
       const response = await client.callTool({
         name: "inspect_rust_binary",
-        arguments: { path },
+        arguments: { detail: "complete", path },
       });
       expect(response.isError).not.toBe(true);
       const evidence = toolContract("inspect_rust_binary").outputSchema.parse(
@@ -144,7 +144,7 @@ mcpTest(
       await writeFile(path, complete);
       const response = await client.callTool({
         name: "inspect_rust_binary",
-        arguments: { path },
+        arguments: { detail: "complete", path },
       });
       expect(parseMcpToolError(response).error).toMatchObject({
         code: "resource_constraint",
@@ -165,7 +165,7 @@ mcpTest(
       await writeFile(path, complete.subarray(0, complete.length - 1));
       const truncated = await client.callTool({
         name: "inspect_rust_binary",
-        arguments: { path },
+        arguments: { detail: "complete", path },
       });
       expect(parseMcpToolError(truncated).error).toMatchObject({
         code: "unsupported_target",

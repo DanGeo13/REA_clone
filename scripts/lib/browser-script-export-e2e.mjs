@@ -16,6 +16,10 @@ import {
 } from "./browser-script-export-assertions.mjs";
 import { mcpTextValue } from "./mcp-verifier-results.mjs";
 import { withVerifierCleanup } from "./verifier-cleanup.mjs";
+import {
+  completeEvidenceClient,
+  completeEvidenceToolArguments,
+} from "./complete-evidence.mjs";
 
 /** Verify capture → export → existing analysis through real CLI and stdio MCP. */
 export async function verifyBrowserScriptExport(
@@ -44,7 +48,9 @@ export async function verifyBrowserScriptExport(
       env,
       stderr: "pipe",
     });
-    client = new Client({ name: "web-script-real-e2e", version: "1" });
+    client = completeEvidenceClient(
+      new Client({ name: "web-script-real-e2e", version: "1" }),
+    );
     const cliCapture = await cli(
       "capture-browser-scenario",
       JSON.stringify(scenario),
@@ -64,6 +70,8 @@ export async function verifyBrowserScriptExport(
     await cli(
       "analyze-javascript-application",
       cliResult.analysis_input.input_path,
+      "--detail",
+      "complete",
     ).then((value) => assertExportedScriptAnalysis(value, 4, true));
     assert.deepEqual(
       site.counts,
@@ -76,7 +84,10 @@ export async function verifyBrowserScriptExport(
       assert.notEqual(result.isError, true, mcpTextValue(result));
       return parseEvidence(JSON.parse(mcpTextValue(result)));
     };
-    const mcpCapture = await call("capture_browser_scenario", scenario);
+    const mcpCapture = await call(
+      "capture_browser_scenario",
+      await completeEvidenceToolArguments("capture_browser_scenario", scenario),
+    );
     const mcpInput = await save("mcp", mcpCapture);
     const mcpCounts = new Map(site.counts);
     const mcpResult = await assertWebScriptExport(
@@ -85,7 +96,10 @@ export async function verifyBrowserScriptExport(
       site.assets,
     );
     assertExportedScriptAnalysis(
-      await call("analyze_javascript_application", mcpResult.analysis_input),
+      await call("analyze_javascript_application", {
+        ...mcpResult.analysis_input,
+        detail: "complete",
+      }),
       4,
       true,
     );
@@ -125,15 +139,17 @@ const verifyPassiveExport = async (attachment, { cli, call, save }) => {
     observation_ms: 100,
     include_script_sources: true,
   };
-  // Export reads the complete capture with its script sources.
-  const page = await call("inspect_web_page", { ...input, detail: "complete" });
+  const page = await call("inspect_web_page", input);
   const pageInput = await save("passive", page);
   const exported = await assertWebScriptExport(
     await call("export_web_scripts", pageInput),
     page,
   );
   assertExportedScriptAnalysis(
-    await call("analyze_javascript_application", exported.analysis_input),
+    await call("analyze_javascript_application", {
+      ...exported.analysis_input,
+      detail: "complete",
+    }),
     exported.scripts.length,
     false,
   );
@@ -158,6 +174,8 @@ const verifyPassiveExport = async (attachment, { cli, call, save }) => {
     await cli(
       "analyze-javascript-application",
       pageCliResult.analysis_input.input_path,
+      "--detail",
+      "complete",
     ),
     pageCliResult.scripts.length,
     false,
